@@ -1,0 +1,24 @@
+[Unit]
+Description=TikTok Telegram Downloader Bot
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/tiktok-downloader-bot
+EnvironmentFile=/opt/tiktok-downloader-bot/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/tiktok-downloader-bot/.venv/bin/python -m app.main
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/tiktok-downloader-bot/runtime
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
