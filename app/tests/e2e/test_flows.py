@@ -214,9 +214,19 @@ async def test_track_trigger_flow_downloads_and_sends_mp3(service_harness) -> No
     assert len(service_harness.gateway.deleted_messages) == 1
 
 
+async def test_track_trigger_download_phase_uses_candidate_url_not_search_expression(service_harness) -> None:
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=402, message_id=23, chat_type="private", text="найти Deftones Change")
+    )
+
+    assert handled is True
+    assert service_harness.track_client.download_calls
+    assert all(not source_url.startswith("ytsearch") for source_url in service_harness.track_client.download_calls)
+
+
 async def test_track_trigger_with_leading_spaces_is_handled(service_harness) -> None:
     handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=402, message_id=23, chat_type="private", text="   песня   Metallica One")
+        IncomingMessage(chat_id=1, user_id=403, message_id=24, chat_type="private", text="   песня   Metallica One")
     )
     assert handled is True
     assert len(service_harness.gateway.sent_audio_receipts) == 1
@@ -225,10 +235,10 @@ async def test_track_trigger_with_leading_spaces_is_handled(service_harness) -> 
 async def test_track_trigger_cache_hit_reuses_cached_mp3(service_harness) -> None:
     text = "трек Metallica One"
     await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=403, message_id=24, chat_type="private", text=text)
+        IncomingMessage(chat_id=1, user_id=404, message_id=25, chat_type="private", text=text)
     )
     await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=2, user_id=404, message_id=25, chat_type="private", text=text)
+        IncomingMessage(chat_id=2, user_id=405, message_id=26, chat_type="private", text=text)
     )
     assert service_harness.track_client.search_calls["metallica one"] == 1
     assert len(service_harness.gateway.sent_audio_receipts) == 2
@@ -237,7 +247,7 @@ async def test_track_trigger_cache_hit_reuses_cached_mp3(service_harness) -> Non
 async def test_track_trigger_repairs_missing_cached_file(service_harness) -> None:
     text = "песня Hot Dog Limp Bizkit"
     await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=405, message_id=26, chat_type="private", text=text)
+        IncomingMessage(chat_id=1, user_id=406, message_id=27, chat_type="private", text=text)
     )
     cached = await service_harness.track_cache_store.get("hot dog limp bizkit")
     assert cached is not None
@@ -245,7 +255,7 @@ async def test_track_trigger_repairs_missing_cached_file(service_harness) -> Non
     cached_path.unlink()
 
     await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=2, user_id=406, message_id=27, chat_type="private", text=text)
+        IncomingMessage(chat_id=2, user_id=407, message_id=28, chat_type="private", text=text)
     )
     assert cached_path.exists()
     assert service_harness.track_client.search_calls["hot dog limp bizkit"] == 1
@@ -280,8 +290,8 @@ async def test_track_trigger_tries_next_candidate_when_first_download_fails(serv
     handled = await service_harness.process_message_service.handle_message(
         IncomingMessage(
             chat_id=1,
-            user_id=406,
-            message_id=28,
+            user_id=408,
+            message_id=29,
             chat_type="private",
             text="найти Linkin Park Somewhere I Belong",
         )
@@ -295,7 +305,7 @@ async def test_track_trigger_tries_next_candidate_when_first_download_fails(serv
 
 async def test_track_trigger_without_query_returns_friendly_error(service_harness) -> None:
     handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=407, message_id=29, chat_type="private", text="найти   ")
+        IncomingMessage(chat_id=1, user_id=409, message_id=30, chat_type="private", text="найти   ")
     )
     assert handled is True
     assert service_harness.gateway.text_messages[-1].text == messages.TRACK_QUERY_EMPTY
@@ -305,8 +315,8 @@ async def test_tiktok_url_wins_over_track_trigger_when_both_present(service_harn
     handled = await service_harness.process_message_service.handle_message(
         IncomingMessage(
             chat_id=1,
-            user_id=408,
-            message_id=30,
+            user_id=410,
+            message_id=31,
             chat_type="private",
             text="найти https://www.tiktok.com/@user/video/2002",
         )

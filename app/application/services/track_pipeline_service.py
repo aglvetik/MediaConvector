@@ -179,7 +179,21 @@ class TrackPipelineService:
                         continue
                 candidates = ()
             if last_error is not None:
+                log_event(
+                    self._logger,
+                    30,
+                    "music_request_exhausted",
+                    normalized_key=request.normalized_resource.normalized_key,
+                    error=str(last_error),
+                )
                 raise last_error
+            log_event(
+                self._logger,
+                30,
+                "music_request_exhausted",
+                normalized_key=request.normalized_resource.normalized_key,
+                error="no_candidates",
+            )
             raise TrackDownloadError("No downloadable YouTube candidates were found.")
         finally:
             await self._temp_file_manager.remove_dir(work_dir)

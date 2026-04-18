@@ -47,6 +47,72 @@ def test_youtube_track_client_omits_cookiefile_when_missing(tmp_path: Path) -> N
     assert "cookiefile" not in options
 
 
+def test_youtube_track_client_search_options_do_not_apply_format_selector() -> None:
+    client = YoutubeTrackClient(
+        timeout_seconds=30,
+        semaphore=asyncio.Semaphore(1),
+    )
+
+    options = client._build_options(
+        download=False,
+        work_dir=None,
+        operation="track_search",
+        format_selector=None,
+    )
+
+    assert "format" not in options
+    assert options["extract_flat"] is False
+
+
+@pytest.mark.asyncio
+async def test_youtube_track_client_search_uses_metadata_only_request() -> None:
+    client = YoutubeTrackClient(
+        timeout_seconds=30,
+        semaphore=asyncio.Semaphore(1),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_extract_info(
+        url: str,
+        download: bool,
+        work_dir: Path | None,
+        operation: str,
+        format_selector: str | None = None,
+    ) -> dict[str, object]:
+        captured.update(
+            {
+                "url": url,
+                "download": download,
+                "work_dir": work_dir,
+                "operation": operation,
+                "format_selector": format_selector,
+            }
+        )
+        return {
+            "entries": [
+                {
+                    "id": "abc123",
+                    "title": "Artist - Track",
+                    "uploader": "Artist",
+                    "webpage_url": "https://www.youtube.com/watch?v=abc123",
+                }
+            ]
+        }
+
+    client._extract_info = fake_extract_info  # type: ignore[method-assign]
+
+    candidates = await client.search_candidates("Linkin Park Numb", normalized_key="music:track:linkin-park-numb")
+
+    assert captured == {
+        "url": "ytsearch5:Linkin Park Numb",
+        "download": False,
+        "work_dir": None,
+        "operation": "track_search",
+        "format_selector": None,
+    }
+    assert candidates[0].source_url == "https://www.youtube.com/watch?v=abc123"
+
+
 @pytest.mark.asyncio
 async def test_youtube_track_client_falls_back_across_format_selectors(tmp_path: Path) -> None:
     client = YoutubeTrackClient(

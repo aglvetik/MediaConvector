@@ -52,6 +52,7 @@ class YoutubeTrackClient:
                         False,
                         None,
                         "track_search",
+                        None,
                     ),
                     timeout=self._timeout_seconds,
                 )
@@ -65,6 +66,15 @@ class YoutubeTrackClient:
             candidates=candidates,
             min_duration_seconds=self._min_duration_seconds,
             max_duration_seconds=self._max_duration_seconds,
+        )
+        log_event(
+            self._logger,
+            20,
+            "music_search_finished",
+            normalized_key=normalized_key,
+            query=query,
+            candidates=len(ranked),
+            candidate_ids=[candidate.source_id for candidate in ranked],
         )
         log_event(
             self._logger,
@@ -180,7 +190,7 @@ class YoutubeTrackClient:
         download: bool,
         work_dir: Path | None,
         operation: str,
-        format_selector: str | None = "bestaudio/best",
+        format_selector: str | None = None,
     ) -> dict[str, Any]:
         options = self._build_options(
             download=download,
@@ -215,7 +225,7 @@ class YoutubeTrackClient:
         download: bool,
         work_dir: Path | None,
         operation: str,
-        format_selector: str | None = "bestaudio/best",
+        format_selector: str | None = None,
     ) -> dict[str, Any]:
         options: dict[str, Any] = {
             "paths": {"home": str(work_dir)} if work_dir is not None else None,
@@ -226,6 +236,7 @@ class YoutubeTrackClient:
             "no_warnings": True,
             "socket_timeout": self._timeout_seconds,
             "cachedir": False,
+            "extract_flat": False if operation == "track_search" else None,
         }
         cookiefile = self._resolve_cookiefile(operation=operation)
         if cookiefile is not None:
