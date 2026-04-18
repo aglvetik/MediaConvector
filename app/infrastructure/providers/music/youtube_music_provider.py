@@ -2,21 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any
 
 import yt_dlp
 
 from app.domain.entities.music_track import MusicTrack
 from app.domain.errors import MusicDownloadError
+from app.infrastructure.downloaders.ytdlp_music_options import build_music_ytdlp_options
 from app.infrastructure.logging import get_logger, log_event
 
 
 class YouTubeMusicProvider:
     provider_name = "ytmusic"
 
-    def __init__(self, *, timeout_seconds: int, semaphore: asyncio.Semaphore) -> None:
+    def __init__(self, *, timeout_seconds: int, semaphore: asyncio.Semaphore, cookies_file: Path | None = None) -> None:
         self._timeout_seconds = timeout_seconds
         self._semaphore = semaphore
+        self._cookies_file = cookies_file
         self._logger = get_logger(__name__)
 
     async def search_best_match(self, query: str) -> MusicTrack | None:
@@ -51,6 +54,12 @@ class YouTubeMusicProvider:
             "socket_timeout": self._timeout_seconds,
             "extractor_retries": 3,
         }
+        options = build_music_ytdlp_options(
+            options,
+            cookies_file=self._cookies_file,
+            logger=self._logger,
+            operation="music_search",
+        )
         try:
             with yt_dlp.YoutubeDL(options) as ydl:
                 return ydl.extract_info(f"ytsearch1:{query}", download=False)

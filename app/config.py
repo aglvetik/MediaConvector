@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     download_timeout_seconds: int = Field(default=120, alias="DOWNLOAD_TIMEOUT_SECONDS")
     ffmpeg_path: str = Field(default="ffmpeg", alias="FFMPEG_PATH")
     ytdlp_path: str = Field(default="yt-dlp", alias="YTDLP_PATH")
+    ytdlp_cookies_file: Path | None = Field(default=None, alias="YTDLP_COOKIES_FILE")
     rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
     user_requests_per_minute: int = Field(default=4, alias="USER_REQUESTS_PER_MINUTE")
     user_request_cooldown_seconds: int = Field(default=3, alias="USER_REQUEST_COOLDOWN_SECONDS")

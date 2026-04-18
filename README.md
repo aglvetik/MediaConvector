@@ -79,6 +79,7 @@ Supported variables:
 - `DOWNLOAD_TIMEOUT_SECONDS`: yt-dlp timeout.
 - `FFMPEG_PATH`: ffmpeg binary path.
 - `YTDLP_PATH`: yt-dlp binary path or executable name for diagnostics.
+- `YTDLP_COOKIES_FILE`: optional Netscape cookies file path for music-search yt-dlp requests.
 - `RATE_LIMIT_ENABLED`: enable per-user rate limiting.
 - `USER_REQUESTS_PER_MINUTE`: per-user request budget.
 - `USER_REQUEST_COOLDOWN_SECONDS`: soft cooldown between new requests from the same user.

@@ -79,10 +79,12 @@ def build_container(settings: Settings) -> AppContainer:
     youtube_music_provider = YouTubeMusicProvider(
         timeout_seconds=settings.music_search_timeout_seconds,
         semaphore=download_semaphore,
+        cookies_file=settings.ytdlp_cookies_file,
     )
     audio_download_client = AudioDownloadClient(
         timeout_seconds=settings.download_timeout_seconds,
         semaphore=download_semaphore,
+        cookies_file=settings.ytdlp_cookies_file,
     )
 
     metrics_service = MetricsService()

@@ -11,12 +11,14 @@ import yt_dlp
 from app.domain.entities.music_track import MusicTrack
 from app.domain.errors import MusicDownloadError
 from app.infrastructure.logging import get_logger, log_event
+from app.infrastructure.downloaders.ytdlp_music_options import build_music_ytdlp_options
 
 
 class AudioDownloadClient:
-    def __init__(self, *, timeout_seconds: int, semaphore: asyncio.Semaphore) -> None:
+    def __init__(self, *, timeout_seconds: int, semaphore: asyncio.Semaphore, cookies_file: Path | None = None) -> None:
         self._timeout_seconds = timeout_seconds
         self._semaphore = semaphore
+        self._cookies_file = cookies_file
         self._logger = get_logger(__name__)
 
     async def download_audio_source(self, track: MusicTrack, work_dir: Path) -> Path:
@@ -75,6 +77,12 @@ class AudioDownloadClient:
             "extractor_retries": 3,
             "cachedir": False,
         }
+        options = build_music_ytdlp_options(
+            options,
+            cookies_file=self._cookies_file,
+            logger=self._logger,
+            operation="music_download",
+        )
         try:
             with yt_dlp.YoutubeDL(options) as ydl:
                 return ydl.extract_info(source_url, download=True)
