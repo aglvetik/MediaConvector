@@ -19,12 +19,14 @@ class YoutubeTrackClient:
         *,
         timeout_seconds: int,
         semaphore: asyncio.Semaphore,
+        cookies_file: Path | None = None,
         search_results_limit: int = 5,
         min_duration_seconds: int = 60,
         max_duration_seconds: int = 12 * 60,
     ) -> None:
         self._timeout_seconds = timeout_seconds
         self._semaphore = semaphore
+        self._cookies_file = cookies_file
         self._search_results_limit = search_results_limit
         self._min_duration_seconds = min_duration_seconds
         self._max_duration_seconds = max_duration_seconds
@@ -32,10 +34,25 @@ class YoutubeTrackClient:
 
     async def search(self, query: str, *, normalized_key: str) -> TrackSearchCandidate:
         async with self._semaphore:
-            log_event(self._logger, 20, "music_search_started", normalized_key=normalized_key, query=query)
+            cookiefile = self._resolve_cookiefile(operation="track_search")
+            log_event(
+                self._logger,
+                20,
+                "music_search_started",
+                normalized_key=normalized_key,
+                query=query,
+                cookies_enabled=cookiefile is not None,
+                cookies_path=str(cookiefile) if cookiefile is not None else None,
+            )
             try:
                 info = await asyncio.wait_for(
-                    asyncio.to_thread(self._extract_info, f"ytsearch{self._search_results_limit}:{query}", False, None),
+                    asyncio.to_thread(
+                        self._extract_info,
+                        f"ytsearch{self._search_results_limit}:{query}",
+                        False,
+                        None,
+                        "track_search",
+                    ),
                     timeout=self._timeout_seconds,
                 )
             except TimeoutError as exc:
@@ -73,10 +90,19 @@ class YoutubeTrackClient:
 
     async def download_audio(self, source_url: str, work_dir: Path, *, normalized_key: str) -> Path:
         async with self._semaphore:
-            log_event(self._logger, 20, "music_download_started", normalized_key=normalized_key, source_url=source_url)
+            cookiefile = self._resolve_cookiefile(operation="track_download")
+            log_event(
+                self._logger,
+                20,
+                "music_download_started",
+                normalized_key=normalized_key,
+                source_url=source_url,
+                cookies_enabled=cookiefile is not None,
+                cookies_path=str(cookiefile) if cookiefile is not None else None,
+            )
             try:
                 info = await asyncio.wait_for(
-                    asyncio.to_thread(self._extract_info, source_url, True, work_dir),
+                    asyncio.to_thread(self._extract_info, source_url, True, work_dir, "track_download"),
                     timeout=self._timeout_seconds,
                 )
             except TimeoutError as exc:
@@ -101,7 +127,25 @@ class YoutubeTrackClient:
         destination.write_bytes(response.content)
         return destination
 
-    def _extract_info(self, url: str, download: bool, work_dir: Path | None) -> dict[str, Any]:
+    def _extract_info(self, url: str, download: bool, work_dir: Path | None, operation: str) -> dict[str, Any]:
+        options = self._build_options(download=download, work_dir=work_dir, operation=operation)
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                return ydl.extract_info(url, download=download)
+        except yt_dlp.utils.DownloadError as exc:
+            log_event(
+                self._logger,
+                40,
+                "yt_dlp_track_failure",
+                operation=operation,
+                url=url,
+                cookies_enabled="cookiefile" in options,
+                cookies_path=options.get("cookiefile"),
+                error_text=str(exc),
+            )
+            raise TrackDownloadError(str(exc), context={"operation": operation}) from exc
+
+    def _build_options(self, *, download: bool, work_dir: Path | None, operation: str) -> dict[str, Any]:
         options: dict[str, Any] = {
             "paths": {"home": str(work_dir)} if work_dir is not None else None,
             "outtmpl": str(work_dir / "%(id)s.%(ext)s") if work_dir is not None else None,
@@ -112,12 +156,24 @@ class YoutubeTrackClient:
             "socket_timeout": self._timeout_seconds,
             "cachedir": False,
         }
-        options = {key: value for key, value in options.items() if value is not None}
-        try:
-            with yt_dlp.YoutubeDL(options) as ydl:
-                return ydl.extract_info(url, download=download)
-        except yt_dlp.utils.DownloadError as exc:
-            raise TrackDownloadError(str(exc)) from exc
+        cookiefile = self._resolve_cookiefile(operation=operation)
+        if cookiefile is not None:
+            options["cookiefile"] = str(cookiefile)
+        return {key: value for key, value in options.items() if value is not None}
+
+    def _resolve_cookiefile(self, *, operation: str) -> Path | None:
+        if self._cookies_file is None:
+            return None
+        if self._cookies_file.exists():
+            return self._cookies_file
+        log_event(
+            self._logger,
+            30,
+            "cookies_missing",
+            operation=operation,
+            cookies_path=str(self._cookies_file),
+        )
+        return None
 
     @staticmethod
     def _build_candidates(entries: list[object]) -> list[TrackSearchCandidate]:

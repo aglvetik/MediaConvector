@@ -56,10 +56,19 @@ def build_container(settings: Settings) -> AppContainer:
     database = Database(settings.database_url)
     bot = Bot(token=settings.bot_token)
     gateway = AiogramTelegramGateway(bot=bot, max_file_size_bytes=settings.max_file_size_bytes)
+    cookies_file = settings.resolved_ytdlp_cookies_file
 
+    logger.info(
+        "cookies_path",
+        extra={
+            "path": str(cookies_file) if cookies_file is not None else None,
+        },
+    )
     logger.info(
         "startup_paths",
         extra={
+            "cookies": str(cookies_file) if cookies_file is not None else None,
+            "cookies_exists": cookies_file.exists() if cookies_file is not None else False,
             "ffmpeg": settings.ffmpeg_path,
             "track_cache_dir": str(settings.track_cache_dir),
             "ytdlp": settings.ytdlp_path,
@@ -88,6 +97,7 @@ def build_container(settings: Settings) -> AppContainer:
     youtube_track_client = YoutubeTrackClient(
         timeout_seconds=settings.download_timeout_seconds,
         semaphore=download_semaphore,
+        cookies_file=cookies_file,
     )
     tiktok_provider = TikTokProvider(
         downloader=ytdlp_client,

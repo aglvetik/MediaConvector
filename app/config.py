@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     download_timeout_seconds: int = Field(default=120, alias="DOWNLOAD_TIMEOUT_SECONDS")
     ffmpeg_path: str = Field(default="ffmpeg", alias="FFMPEG_PATH")
     ytdlp_path: str = Field(default="yt-dlp", alias="YTDLP_PATH")
+    ytdlp_cookies_file: Path | None = Field(default=None, alias="YTDLP_COOKIES_FILE")
     rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
     user_requests_per_minute: int = Field(default=4, alias="USER_REQUESTS_PER_MINUTE")
     user_request_cooldown_seconds: int = Field(default=3, alias="USER_REQUEST_COOLDOWN_SECONDS")
@@ -61,6 +62,13 @@ class Settings(BaseSettings):
             raise ValueError("Time interval values must be >= 1 minute.")
         return value
 
+    @field_validator("ytdlp_cookies_file", mode="before")
+    @classmethod
+    def _blank_cookies_file_to_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @property
     def max_file_size_bytes(self) -> int:
         return self.max_file_size_mb * 1024 * 1024
@@ -70,6 +78,15 @@ class Settings(BaseSettings):
         if self.database_url.startswith("sqlite+aiosqlite:///"):
             return self.database_url.replace("sqlite+aiosqlite:///", "sqlite:///")
         return self.database_url
+
+    @property
+    def resolved_ytdlp_cookies_file(self) -> Path | None:
+        if self.ytdlp_cookies_file is None:
+            return None
+        cookies_path = self.ytdlp_cookies_file.expanduser()
+        if cookies_path.is_absolute():
+            return cookies_path
+        return Path.cwd() / cookies_path
 
     def ensure_runtime_dirs(self) -> None:
         self.temp_dir.mkdir(parents=True, exist_ok=True)
