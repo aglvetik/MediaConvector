@@ -79,82 +79,100 @@ class AudioDownloadClient:
         return target_path
 
     def _download_audio(self, source_url: str, work_dir: Path, cookies_file: Path | None) -> dict[str, Any]:
-        option_variants = self._build_download_option_variants(work_dir, cookies_file)
-        last_exception: yt_dlp.utils.DownloadError | None = None
-        last_error_code = MusicFailureCode.DOWNLOAD_FAILED
-
-        for index, options in enumerate(option_variants):
-            try:
-                with yt_dlp.YoutubeDL(options) as ydl:
-                    return ydl.extract_info(source_url, download=True)
-            except yt_dlp.utils.DownloadError as exc:
-                last_exception = exc
-                last_error_code = classify_ytdlp_music_error(str(exc))
-                self._logger.exception(
-                    "yt_dlp_failure",
-                    extra={
-                        "source_url": source_url,
-                        "error_code": last_error_code.value,
-                        "raw_error": str(exc),
-                        "format_selector": options.get("format"),
-                        "attempt_index": index + 1,
-                    },
-                )
-                if last_error_code == MusicFailureCode.NO_FORMATS and index + 1 < len(option_variants):
-                    next_format = option_variants[index + 1].get("format")
-                    log_event(
-                        self._logger,
-                        logging.WARNING,
-                        "music_download_format_fallback",
-                        source_url=source_url,
-                        failed_format=options.get("format"),
-                        next_format=next_format,
-                    )
-                    continue
-                raise MusicDownloadError(
-                    str(exc),
-                    error_code=last_error_code.value,
-                    context={"source_url": source_url, "format_selector": options.get("format")},
-                ) from exc
-
-        if last_exception is None:
-            raise MusicDownloadError(
-                "Music download failed without executing yt-dlp.",
-                context={"source_url": source_url},
+        options = self._build_download_options(work_dir, cookies_file)
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                return ydl.extract_info(source_url, download=True)
+        except yt_dlp.utils.DownloadError as exc:
+            error_code = classify_ytdlp_music_error(str(exc))
+            self._logger.exception(
+                "yt_dlp_failure",
+                extra={
+                    "source_url": source_url,
+                    "error_code": error_code.value,
+                    "raw_error": str(exc),
+                    "format_selector": options.get("format"),
+                },
             )
-        raise MusicDownloadError(
-            str(last_exception),
-            error_code=last_error_code.value,
-            context={"source_url": source_url},
-        ) from last_exception
+            self._log_available_formats(source_url, cookies_file)
+            raise MusicDownloadError(
+                str(exc),
+                error_code=error_code.value,
+                context={"source_url": source_url, "format_selector": options.get("format")},
+            ) from exc
 
-    def _build_download_option_variants(self, work_dir: Path, cookies_file: Path | None) -> list[dict[str, Any]]:
+    def _build_download_options(self, work_dir: Path, cookies_file: Path | None) -> dict[str, Any]:
+        # Prefer a single minimal selector that matches the known-good manual yt-dlp behavior
+        # more closely than direct-audio-only selection. ffmpeg will extract/transcode later.
         base_options: dict[str, Any] = {
             "paths": {"home": str(work_dir)},
             "outtmpl": str(work_dir / "source.%(ext)s"),
+            "format": self._build_format_selector(),
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
-            "retries": 3,
             "socket_timeout": self._timeout_seconds,
-            "extractor_retries": 3,
-            "cachedir": False,
         }
-        format_selectors = self._build_format_selectors()
-        return [
-            build_music_ytdlp_options(
-                {**base_options, "format": format_selector},
-                cookies_file=cookies_file,
-                logger=self._logger,
-                operation="music_download",
-            )
-            for format_selector in format_selectors
-        ]
+        return build_music_ytdlp_options(
+            base_options,
+            cookies_file=cookies_file,
+            logger=self._logger,
+            operation="music_download",
+        )
 
-    def _build_format_selectors(self) -> tuple[str, ...]:
-        if self._audio_only:
-            return ("bestaudio/best", "best")
-        return ("best",)
+    def _build_format_selector(self) -> str:
+        return "best"
+
+    def _log_available_formats(self, source_url: str, cookies_file: Path | None) -> None:
+        if not self._logger.isEnabledFor(logging.DEBUG):
+            return
+
+        diagnostic_options: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "socket_timeout": self._timeout_seconds,
+        }
+        diagnostic_options = build_music_ytdlp_options(
+            diagnostic_options,
+            cookies_file=cookies_file,
+            logger=self._logger,
+            operation="music_download_diagnostics",
+        )
+        try:
+            with yt_dlp.YoutubeDL(diagnostic_options) as ydl:
+                info = ydl.extract_info(source_url, download=False)
+        except Exception:
+            self._logger.debug(
+                "yt_dlp_available_formats_failed",
+                exc_info=True,
+                extra={"source_url": source_url},
+            )
+            return
+
+        formats = info.get("formats") or []
+        summarized_formats = [
+            {
+                "format_id": item.get("format_id"),
+                "ext": item.get("ext"),
+                "acodec": item.get("acodec"),
+                "vcodec": item.get("vcodec"),
+                "format_note": item.get("format_note"),
+                "abr": item.get("abr"),
+                "tbr": item.get("tbr"),
+                "height": item.get("height"),
+                "protocol": item.get("protocol"),
+            }
+            for item in formats[:12]
+        ]
+        log_event(
+            self._logger,
+            logging.DEBUG,
+            "music_download_available_formats",
+            source_url=source_url,
+            format_count=len(formats),
+            formats=summarized_formats,
+        )
 
     @staticmethod
     def _resolve_downloaded_path(work_dir: Path, info: dict[str, Any]) -> Path:
