@@ -14,12 +14,15 @@ from app.application.services import (
     MetricsService,
     ProcessMessageService,
     RateLimitService,
+    TrackPipelineService,
+    TrackTriggerService,
     UserRequestGuardService,
 )
 from app.config import Settings
-from app.infrastructure.downloaders import YtDlpClient
+from app.infrastructure.downloaders import YoutubeTrackClient, YtDlpClient
 from app.infrastructure.logging import get_logger
 from app.infrastructure.media import FfmpegAdapter
+from app.infrastructure.persistence import JsonTrackCacheStore
 from app.infrastructure.persistence.sqlite import (
     Database,
     SqlAlchemyCacheRepository,
@@ -58,6 +61,7 @@ def build_container(settings: Settings) -> AppContainer:
         "startup_paths",
         extra={
             "ffmpeg": settings.ffmpeg_path,
+            "track_cache_dir": str(settings.track_cache_dir),
             "ytdlp": settings.ytdlp_path,
         },
     )
@@ -81,10 +85,15 @@ def build_container(settings: Settings) -> AppContainer:
         timeout_seconds=settings.request_timeout_seconds,
         semaphore=ffmpeg_semaphore,
     )
+    youtube_track_client = YoutubeTrackClient(
+        timeout_seconds=settings.download_timeout_seconds,
+        semaphore=download_semaphore,
+    )
     tiktok_provider = TikTokProvider(
         downloader=ytdlp_client,
         request_timeout_seconds=settings.request_timeout_seconds,
     )
+    track_cache_store = JsonTrackCacheStore(settings.track_cache_dir)
 
     metrics_service = MetricsService()
     cache_service = CacheService(cache_repository)
@@ -99,6 +108,15 @@ def build_container(settings: Settings) -> AppContainer:
         temp_file_manager=temp_file_manager,
         metrics_service=metrics_service,
     )
+    track_pipeline_service = TrackPipelineService(
+        delivery_service=delivery_service,
+        dedup_service=dedup_service,
+        ffmpeg_adapter=ffmpeg_adapter,
+        temp_file_manager=temp_file_manager,
+        track_client=youtube_track_client,
+        track_cache_store=track_cache_store,
+        metrics_service=metrics_service,
+    )
     rate_limit_service = RateLimitService(
         enabled=settings.rate_limit_enabled,
         requests_per_minute=settings.user_requests_per_minute,
@@ -110,6 +128,8 @@ def build_container(settings: Settings) -> AppContainer:
         providers=(tiktok_provider,),
         delivery_service=delivery_service,
         media_pipeline_service=media_pipeline_service,
+        track_trigger_service=TrackTriggerService(),
+        track_pipeline_service=track_pipeline_service,
         rate_limit_service=rate_limit_service,
         user_request_guard_service=user_request_guard_service,
         processed_message_repository=processed_message_repository,

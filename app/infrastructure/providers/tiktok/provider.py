@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import re
+from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -8,11 +11,32 @@ import httpx
 from app.domain.entities.media_result import MediaMetadata
 from app.domain.entities.normalized_resource import NormalizedResource
 from app.domain.enums.platform import Platform
-from app.domain.errors import NormalizationError, UnsupportedUrlError
+from app.domain.enums.tiktok_resource_type import TikTokResourceType
+from app.domain.errors import DownloadError, NormalizationError, UnsupportedUrlError
 from app.domain.policies import build_cache_key
 from app.infrastructure.downloaders import YtDlpClient
 from app.infrastructure.logging import get_logger, log_event
-from app.infrastructure.providers.tiktok.url_utils import extract_first_tiktok_url, extract_video_id, is_tiktok_host, sanitize_url
+from app.infrastructure.providers.tiktok.url_utils import (
+    extract_first_tiktok_url,
+    extract_music_id,
+    extract_photo_id,
+    extract_video_id,
+    is_tiktok_host,
+    sanitize_url,
+)
+
+_WEB_JSON_PATTERNS = (
+    re.compile(
+        r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(?P<payload>.+?)</script>',
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r'<script[^>]+id="SIGI_STATE"[^>]*>(?P<payload>.+?)</script>',
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
+_IMAGE_URL_PATTERN = re.compile(r"https?://[^\s\"']+\.(?:jpg|jpeg|png|webp)(?:[^\s\"']*)", re.IGNORECASE)
+_AUDIO_URL_PATTERN = re.compile(r"https?://[^\s\"']+tiktokcdn\.com[^\s\"']+(?:\.mp3|\.m4a)?[^\s\"']*", re.IGNORECASE)
 
 
 class TikTokProvider:
@@ -38,34 +62,108 @@ class TikTokProvider:
             resolved_url = await self._resolve_short_url(url)
         except httpx.HTTPError as exc:
             raise NormalizationError("Failed to resolve TikTok short URL.", context={"url": original_url}) from exc
-        resource_id = extract_video_id(resolved_url)
-        canonical_url = sanitize_url(resolved_url)
 
-        if resource_id is None:
+        sanitized_resolved_url = sanitize_url(resolved_url)
+        info: dict[str, object] = {}
+        try:
             info = await self._downloader.probe_url(original_url)
-            resource_id = str(info.get("id") or "")
-            canonical_url = sanitize_url(str(info.get("webpage_url") or canonical_url))
-            if not resource_id:
-                raise NormalizationError("Could not extract TikTok video id.", context={"url": original_url})
+        except DownloadError:
+            info = {}
 
-        normalized_key = build_cache_key(Platform.TIKTOK, "video", resource_id)
+        resource_type = self._resolve_resource_type(sanitized_resolved_url, info)
+        resource_id = self._resolve_resource_id(sanitized_resolved_url, info, resource_type)
+        canonical_url = sanitized_resolved_url
+        if not resource_id:
+            canonical_url = sanitize_url(str(info.get("webpage_url") or resolved_url))
+            resource_id = self._resolve_resource_id(canonical_url, info, resource_type)
+        if not resource_id:
+            raise NormalizationError("Could not extract TikTok resource id.", context={"url": original_url})
+
+        web_state = await self._load_web_state(canonical_url if canonical_url.startswith("http") else resolved_url)
+        image_urls = tuple(self._extract_image_urls(info, web_state))
+        audio_url = self._extract_audio_url(info, web_state)
+        video_url = self._extract_video_url(info)
+        thumbnail_url = self._extract_thumbnail_url(info, web_state)
+        title = self._extract_title(info, web_state)
+        author = self._extract_author(info, web_state)
+        duration_sec = self._extract_duration(info, web_state)
+
+        if resource_type == TikTokResourceType.PHOTO_POST and not image_urls:
+            raise NormalizationError("Photo post did not expose any images.", context={"url": original_url})
+        if resource_type == TikTokResourceType.MUSIC_ONLY and audio_url is None:
+            raise NormalizationError("TikTok music link did not expose an audio URL.", context={"url": original_url})
+
         normalized = NormalizedResource(
             platform=Platform.TIKTOK,
-            resource_type="video",
+            resource_type=resource_type.value,
             resource_id=resource_id,
-            normalized_key=normalized_key,
+            normalized_key=build_cache_key(Platform.TIKTOK, resource_type.value, resource_id),
             original_url=original_url,
-            canonical_url=canonical_url if "/video/" in canonical_url else f"https://www.tiktok.com/@_/video/{resource_id}",
+            canonical_url=canonical_url or resolved_url,
+            title=title,
+            author=author,
+            video_url=video_url,
+            audio_url=audio_url,
+            image_urls=image_urls,
+            thumbnail_url=thumbnail_url,
+            duration_sec=duration_sec,
         )
-        log_event(self._logger, 20, "normalization_completed", normalized_key=normalized.normalized_key, canonical_url=normalized.canonical_url)
+        log_event(
+            self._logger,
+            20,
+            "tiktok_resource_resolved",
+            normalized_key=normalized.normalized_key,
+            resource_type=normalized.resource_type,
+            canonical_url=normalized.canonical_url,
+        )
+        if resource_type == TikTokResourceType.PHOTO_POST:
+            log_event(self._logger, 20, "tiktok_photo_post_detected", normalized_key=normalized.normalized_key)
+        elif resource_type == TikTokResourceType.MUSIC_ONLY:
+            log_event(self._logger, 20, "tiktok_music_link_detected", normalized_key=normalized.normalized_key)
+        else:
+            log_event(self._logger, 20, "normalization_completed", normalized_key=normalized.normalized_key, canonical_url=normalized.canonical_url)
         return normalized
 
     async def fetch_metadata(self, normalized: NormalizedResource) -> MediaMetadata:
+        if normalized.resource_type == TikTokResourceType.MUSIC_ONLY.value:
+            return MediaMetadata(
+                title=normalized.title,
+                duration_sec=normalized.duration_sec,
+                author=normalized.author,
+                description=None,
+                size_bytes=None,
+                has_audio=True,
+            )
+        if normalized.resource_type == TikTokResourceType.PHOTO_POST.value:
+            return MediaMetadata(
+                title=normalized.title,
+                duration_sec=normalized.duration_sec,
+                author=normalized.author,
+                description=None,
+                size_bytes=None,
+                has_audio=normalized.audio_url is not None,
+            )
         return await self._downloader.fetch_metadata(normalized)
 
     async def download_video(self, normalized: NormalizedResource, work_dir: Path) -> Path:
         path, _ = await self._downloader.download_video(normalized, work_dir)
         return path
+
+    async def download_audio(self, normalized: NormalizedResource, work_dir: Path) -> Path | None:
+        if normalized.audio_url is None:
+            return None
+        extension = self._guess_extension(normalized.audio_url, default="m4a")
+        audio_path = work_dir / f"{normalized.resource_id}-audio.{extension}"
+        await self._download_binary(normalized.audio_url, audio_path)
+        return audio_path
+
+    async def download_images(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, ...]:
+        paths: list[Path] = []
+        for index, image_url in enumerate(normalized.image_urls, start=1):
+            image_path = work_dir / f"{normalized.resource_id}-photo-{index}.{self._guess_extension(image_url, default='jpg')}"
+            await self._download_binary(image_url, image_path)
+            paths.append(image_path)
+        return tuple(paths)
 
     async def download_with_metadata(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, MediaMetadata]:
         return await self._downloader.download_video(normalized, work_dir)
@@ -86,3 +184,254 @@ class TikTokProvider:
             )
             response.raise_for_status()
             return sanitize_url(str(response.url))
+
+    async def _load_web_state(self, url: str) -> dict[str, object]:
+        try:
+            async with httpx.AsyncClient(timeout=self._request_timeout_seconds, follow_redirects=True) as client:
+                response = await client.get(
+                    url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                        )
+                    },
+                )
+                response.raise_for_status()
+        except httpx.HTTPError:
+            return {}
+
+        html = response.text
+        for pattern in _WEB_JSON_PATTERNS:
+            match = pattern.search(html)
+            if not match:
+                continue
+            payload = match.group("payload")
+            try:
+                return json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+        return {}
+
+    async def _download_binary(self, url: str, destination: Path) -> None:
+        try:
+            async with httpx.AsyncClient(timeout=self._request_timeout_seconds, follow_redirects=True) as client:
+                response = await client.get(
+                    url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                        )
+                    },
+                )
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise DownloadError("Failed to fetch TikTok binary asset.", context={"url": url}) from exc
+        destination.write_bytes(response.content)
+
+    def _resolve_resource_type(self, canonical_url: str, info: dict[str, object]) -> TikTokResourceType:
+        path = urlparse(canonical_url).path.lower()
+        if "/music/" in path:
+            return TikTokResourceType.MUSIC_ONLY
+        if "/photo/" in path:
+            return TikTokResourceType.PHOTO_POST
+        if self._looks_like_photo_post(info):
+            return TikTokResourceType.PHOTO_POST
+        if self._looks_like_music_only(info):
+            return TikTokResourceType.MUSIC_ONLY
+        return TikTokResourceType.VIDEO
+
+    @staticmethod
+    def _resolve_resource_id(canonical_url: str, info: dict[str, object], resource_type: TikTokResourceType) -> str:
+        if resource_type == TikTokResourceType.PHOTO_POST:
+            return extract_photo_id(canonical_url) or str(info.get("id") or "")
+        if resource_type == TikTokResourceType.MUSIC_ONLY:
+            return extract_music_id(canonical_url) or str(info.get("id") or "")
+        return extract_video_id(canonical_url) or str(info.get("id") or "")
+
+    @staticmethod
+    def _looks_like_photo_post(info: dict[str, object]) -> bool:
+        entries = info.get("entries")
+        if isinstance(entries, list) and entries:
+            return True
+        formats = info.get("formats")
+        if not isinstance(formats, list):
+            return False
+        if not formats:
+            return False
+        has_real_video = any(
+            isinstance(item, dict) and item.get("vcodec") not in {None, "none"} and (item.get("width") or item.get("height"))
+            for item in formats
+        )
+        return not has_real_video and any(isinstance(item, dict) and "music" in str(item.get("url") or "") for item in formats)
+
+    @staticmethod
+    def _looks_like_music_only(info: dict[str, object]) -> bool:
+        formats = info.get("formats")
+        if isinstance(formats, list) and formats:
+            return all(isinstance(item, dict) and item.get("vcodec") in {None, "none"} for item in formats)
+        return False
+
+    def _extract_image_urls(self, info: dict[str, object], web_state: dict[str, object]) -> list[str]:
+        urls: list[str] = []
+        entries = info.get("entries")
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                for candidate in (
+                    entry.get("url"),
+                    entry.get("image"),
+                    entry.get("display_url"),
+                    self._pick_first_url(entry.get("thumbnails")),
+                ):
+                    if candidate:
+                        urls.append(str(candidate))
+        urls.extend(self._find_image_urls_in_mapping(web_state))
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for url in urls:
+            sanitized = url.strip()
+            if not sanitized or sanitized in seen:
+                continue
+            seen.add(sanitized)
+            deduped.append(sanitized)
+        return deduped
+
+    def _extract_audio_url(self, info: dict[str, object], web_state: dict[str, object]) -> str | None:
+        formats = info.get("formats")
+        if isinstance(formats, list):
+            for item in formats:
+                if not isinstance(item, dict):
+                    continue
+                candidate = str(item.get("url") or "")
+                if candidate and ("music" in candidate or item.get("vcodec") == "none" or item.get("format_id") == "audio"):
+                    return candidate
+        candidates = self._find_audio_urls_in_mapping(web_state)
+        return candidates[0] if candidates else None
+
+    @staticmethod
+    def _extract_video_url(info: dict[str, object]) -> str | None:
+        formats = info.get("formats")
+        if not isinstance(formats, list):
+            return None
+        for item in formats:
+            if not isinstance(item, dict):
+                continue
+            if item.get("vcodec") not in {None, "none"} and str(item.get("url") or "").startswith("http"):
+                return str(item["url"])
+        return None
+
+    def _extract_thumbnail_url(self, info: dict[str, object], web_state: dict[str, object]) -> str | None:
+        thumbnails = info.get("thumbnails")
+        thumbnail = self._pick_first_url(thumbnails)
+        if thumbnail:
+            return thumbnail
+        return self._pick_first_url(self._find_values(web_state, {"thumbnail", "cover", "originCover", "origin_cover"}))
+
+    @staticmethod
+    def _extract_title(info: dict[str, object], web_state: dict[str, object]) -> str | None:
+        return _clean_text(
+            str(
+                info.get("track")
+                or info.get("title")
+                or TikTokProvider._pick_first_scalar(web_state, {"title", "desc", "description"})
+                or ""
+            )
+        ) or None
+
+    @staticmethod
+    def _extract_author(info: dict[str, object], web_state: dict[str, object]) -> str | None:
+        return _clean_text(
+            str(
+                info.get("uploader")
+                or info.get("channel")
+                or info.get("creator")
+                or TikTokProvider._pick_first_scalar(web_state, {"authorName", "author", "nickname", "unique_id"})
+                or ""
+            )
+        ) or None
+
+    @staticmethod
+    def _extract_duration(info: dict[str, object], web_state: dict[str, object]) -> int | None:
+        raw_duration = info.get("duration") or TikTokProvider._pick_first_scalar(web_state, {"duration"})
+        try:
+            return int(raw_duration) if raw_duration is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _find_image_urls_in_mapping(self, payload: object) -> list[str]:
+        urls = list(_iter_matching_urls(payload, _IMAGE_URL_PATTERN))
+        return [url for url in urls if "avatar" not in url and "cover" not in url]
+
+    def _find_audio_urls_in_mapping(self, payload: object) -> list[str]:
+        return list(_iter_matching_urls(payload, _AUDIO_URL_PATTERN))
+
+    @staticmethod
+    def _find_values(payload: object, keys: set[str]) -> list[object]:
+        found: list[object] = []
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                if key in keys:
+                    found.append(value)
+                found.extend(TikTokProvider._find_values(value, keys))
+        elif isinstance(payload, list):
+            for item in payload:
+                found.extend(TikTokProvider._find_values(item, keys))
+        return found
+
+    @staticmethod
+    def _pick_first_scalar(payload: object, keys: set[str]) -> str | None:
+        for value in TikTokProvider._find_values(payload, keys):
+            if isinstance(value, str) and value.strip():
+                return value
+        return None
+
+    @staticmethod
+    def _pick_first_url(payload: object) -> str | None:
+        if isinstance(payload, str) and payload.startswith("http"):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("url", "src", "image", "display_image", "displayImage"):
+                candidate = payload.get(key)
+                if isinstance(candidate, str) and candidate.startswith("http"):
+                    return candidate
+            for key in ("url_list", "urlList"):
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    for item in candidate:
+                        if isinstance(item, str) and item.startswith("http"):
+                            return item
+        if isinstance(payload, list):
+            for item in payload:
+                candidate = TikTokProvider._pick_first_url(item)
+                if candidate:
+                    return candidate
+        return None
+
+    @staticmethod
+    def _guess_extension(url: str, *, default: str) -> str:
+        path = urlparse(url).path.lower()
+        for extension in ("jpg", "jpeg", "png", "webp", "mp3", "m4a", "aac"):
+            if path.endswith(f".{extension}"):
+                return extension
+        return default
+
+
+def _clean_text(value: str) -> str:
+    return " ".join(value.split()).strip()
+
+
+def _iter_matching_urls(payload: object, pattern: re.Pattern[str]) -> Iterable[str]:
+    if isinstance(payload, str):
+        for match in pattern.findall(payload):
+            yield match
+        return
+    if isinstance(payload, dict):
+        for value in payload.values():
+            yield from _iter_matching_urls(value, pattern)
+        return
+    if isinstance(payload, list):
+        for item in payload:
+            yield from _iter_matching_urls(item, pattern)

@@ -41,6 +41,9 @@ class TelegramGateway(Protocol):
         file_id: str,
         caption: str | None = None,
         reply_to_message_id: int | None = None,
+        *,
+        title: str | None = None,
+        performer: str | None = None,
     ) -> DeliveryReceipt:
         ...
 
@@ -59,5 +62,43 @@ class TelegramGateway(Protocol):
         file_path: Path,
         caption: str | None = None,
         reply_to_message_id: int | None = None,
+        *,
+        title: str | None = None,
+        performer: str | None = None,
+        thumbnail_path: Path | None = None,
     ) -> DeliveryReceipt:
+        ...
+
+    async def send_photo_by_upload(
+        self,
+        chat_id: int,
+        file_path: Path,
+        caption: str | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> DeliveryReceipt:
+        ...
+
+    async def send_photo_by_file_id(
+        self,
+        chat_id: int,
+        file_id: str,
+        caption: str | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> DeliveryReceipt:
+        ...
+
+    async def send_photo_group_by_upload(
+        self,
+        chat_id: int,
+        file_paths: tuple[Path, ...],
+        reply_to_message_id: int | None = None,
+    ) -> tuple[DeliveryReceipt, ...]:
+        ...
+
+    async def send_photo_group_by_file_id(
+        self,
+        chat_id: int,
+        file_ids: tuple[str, ...],
+        reply_to_message_id: int | None = None,
+    ) -> tuple[DeliveryReceipt, ...]:
         ...

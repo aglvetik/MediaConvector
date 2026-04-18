@@ -23,13 +23,16 @@ async def test_repository_roundtrip(database) -> None:
         CacheEntry(
             id=None,
             platform=Platform.TIKTOK,
+            resource_type="video",
             normalized_key="tiktok:video:1",
             original_url="https://www.tiktok.com/@u/video/1",
             canonical_url="https://www.tiktok.com/@u/video/1",
             video_file_id="vid1",
             audio_file_id="aud1",
+            photo_file_ids=("photo1", "photo2"),
             video_file_unique_id="uvid1",
             audio_file_unique_id="uaud1",
+            photo_file_unique_ids=("uphoto1", "uphoto2"),
             duration_sec=10,
             video_size_bytes=100,
             audio_size_bytes=10,
@@ -46,6 +49,7 @@ async def test_repository_roundtrip(database) -> None:
     fetched = await cache_repo.get_by_normalized_key("tiktok:video:1")
     assert fetched is not None
     assert fetched.video_file_id == "vid1"
+    assert fetched.photo_file_ids == ("photo1", "photo2")
     await cache_repo.increment_hit("tiktok:video:1")
     fetched = await cache_repo.get_by_normalized_key("tiktok:video:1")
     assert fetched.hit_count == 1

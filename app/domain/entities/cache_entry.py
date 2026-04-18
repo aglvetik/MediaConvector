@@ -11,13 +11,16 @@ from app.domain.enums.platform import Platform
 class CacheEntry:
     id: int | None
     platform: Platform
+    resource_type: str
     normalized_key: str
     original_url: str
     canonical_url: str
     video_file_id: str | None
     audio_file_id: str | None
+    photo_file_ids: tuple[str, ...]
     video_file_unique_id: str | None
     audio_file_unique_id: str | None
+    photo_file_unique_ids: tuple[str, ...]
     duration_sec: int | None
     video_size_bytes: int | None
     audio_size_bytes: int | None
@@ -37,3 +40,17 @@ class CacheEntry:
     @property
     def is_ready_for_audio(self) -> bool:
         return self.is_valid and self.audio_file_id is not None and self.status in {CacheStatus.READY, CacheStatus.PARTIAL}
+
+    @property
+    def is_ready_for_photos(self) -> bool:
+        return self.is_valid and bool(self.photo_file_ids) and self.status in {CacheStatus.READY, CacheStatus.PARTIAL}
+
+    def is_ready_for_resource(self, resource_type: str) -> bool:
+        normalized_type = resource_type.strip().lower()
+        if normalized_type == "video":
+            return self.is_ready_for_video
+        if normalized_type == "photo_post":
+            return self.is_ready_for_photos
+        if normalized_type == "music_only":
+            return self.is_ready_for_audio
+        return False

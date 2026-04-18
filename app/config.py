@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     database_url: str = Field(default="sqlite+aiosqlite:///runtime/bot.db", alias="DATABASE_URL")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     temp_dir: Path = Field(default=Path("runtime/tmp"), alias="TEMP_DIR")
+    track_cache_dir: Path = Field(default=Path("cache"), alias="TRACK_CACHE_DIR")
     max_parallel_downloads: int = Field(default=2, alias="MAX_PARALLEL_DOWNLOADS")
     max_parallel_ffmpeg: int = Field(default=2, alias="MAX_PARALLEL_FFMPEG")
     max_file_size_mb: int = Field(default=45, alias="MAX_FILE_SIZE_MB")
@@ -72,6 +73,7 @@ class Settings(BaseSettings):
 
     def ensure_runtime_dirs(self) -> None:
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.track_cache_dir.mkdir(parents=True, exist_ok=True)
         database_path = self.database_path
         if database_path is not None:
             database_path.parent.mkdir(parents=True, exist_ok=True)

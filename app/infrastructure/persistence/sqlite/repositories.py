@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+import json
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert
@@ -25,13 +26,16 @@ def _to_cache_entity(model: MediaCacheModel) -> CacheEntry:
     return CacheEntry(
         id=model.id,
         platform=Platform(model.platform),
+        resource_type=model.resource_type,
         normalized_key=model.normalized_key,
         original_url=model.original_url,
         canonical_url=model.canonical_url,
         video_file_id=model.video_file_id,
         audio_file_id=model.audio_file_id,
+        photo_file_ids=tuple(_loads_string_list(model.photo_file_ids)),
         video_file_unique_id=model.video_file_unique_id,
         audio_file_unique_id=model.audio_file_unique_id,
+        photo_file_unique_ids=tuple(_loads_string_list(model.photo_file_unique_ids)),
         duration_sec=model.duration_sec,
         video_size_bytes=model.video_size_bytes,
         audio_size_bytes=model.audio_size_bytes,
@@ -44,6 +48,24 @@ def _to_cache_entity(model: MediaCacheModel) -> CacheEntry:
         updated_at=model.updated_at,
         last_hit_at=model.last_hit_at,
     )
+
+
+def _loads_string_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        loaded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return [str(item) for item in loaded if item]
+
+
+def _dumps_string_list(values: tuple[str, ...]) -> str | None:
+    if not values:
+        return None
+    return json.dumps(list(values), ensure_ascii=False)
 
 
 class SqlAlchemyCacheRepository:
@@ -63,13 +85,16 @@ class SqlAlchemyCacheRepository:
             version = current.cache_version if current else 1
             stmt = insert(MediaCacheModel).values(
                 platform=entry.platform.value,
+                resource_type=entry.resource_type,
                 normalized_key=entry.normalized_key,
                 original_url=entry.original_url,
                 canonical_url=entry.canonical_url,
                 video_file_id=current.video_file_id if current else None,
                 audio_file_id=current.audio_file_id if current else None,
+                photo_file_ids=current.photo_file_ids if current else None,
                 video_file_unique_id=current.video_file_unique_id if current else None,
                 audio_file_unique_id=current.audio_file_unique_id if current else None,
+                photo_file_unique_ids=current.photo_file_unique_ids if current else None,
                 duration_sec=current.duration_sec if current else None,
                 video_size_bytes=current.video_size_bytes if current else None,
                 audio_size_bytes=current.audio_size_bytes if current else None,
@@ -84,6 +109,7 @@ class SqlAlchemyCacheRepository:
                 index_elements=[MediaCacheModel.normalized_key],
                 set_={
                     "platform": entry.platform.value,
+                    "resource_type": entry.resource_type,
                     "original_url": entry.original_url,
                     "canonical_url": entry.canonical_url,
                     "status": CacheStatus.PROCESSING.value,
@@ -105,13 +131,16 @@ class SqlAlchemyCacheRepository:
             version = 1 if current is None else current.cache_version + 1
             stmt = insert(MediaCacheModel).values(
                 platform=entry.platform.value,
+                resource_type=entry.resource_type,
                 normalized_key=entry.normalized_key,
                 original_url=entry.original_url,
                 canonical_url=entry.canonical_url,
                 video_file_id=entry.video_file_id,
                 audio_file_id=entry.audio_file_id,
+                photo_file_ids=_dumps_string_list(entry.photo_file_ids),
                 video_file_unique_id=entry.video_file_unique_id,
                 audio_file_unique_id=entry.audio_file_unique_id,
+                photo_file_unique_ids=_dumps_string_list(entry.photo_file_unique_ids),
                 duration_sec=entry.duration_sec,
                 video_size_bytes=entry.video_size_bytes,
                 audio_size_bytes=entry.audio_size_bytes,
@@ -126,12 +155,15 @@ class SqlAlchemyCacheRepository:
                 index_elements=[MediaCacheModel.normalized_key],
                 set_={
                     "platform": entry.platform.value,
+                    "resource_type": entry.resource_type,
                     "original_url": entry.original_url,
                     "canonical_url": entry.canonical_url,
                     "video_file_id": entry.video_file_id,
                     "audio_file_id": entry.audio_file_id,
+                    "photo_file_ids": _dumps_string_list(entry.photo_file_ids),
                     "video_file_unique_id": entry.video_file_unique_id,
                     "audio_file_unique_id": entry.audio_file_unique_id,
+                    "photo_file_unique_ids": _dumps_string_list(entry.photo_file_unique_ids),
                     "duration_sec": entry.duration_sec,
                     "video_size_bytes": entry.video_size_bytes,
                     "audio_size_bytes": entry.audio_size_bytes,

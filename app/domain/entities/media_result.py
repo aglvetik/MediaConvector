@@ -31,5 +31,5 @@ class MediaResult:
     audio_receipt: DeliveryReceipt | None
     has_audio: bool
     cache_hit: bool
+    photo_receipts: tuple[DeliveryReceipt, ...] = ()
     user_notice: str | None = None
-

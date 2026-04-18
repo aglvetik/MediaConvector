@@ -14,6 +14,7 @@ def test_settings_load_with_minimal_required_env(monkeypatch, tmp_path) -> None:
     assert settings.bot_mode == "polling"
     assert settings.database_url == "sqlite+aiosqlite:///runtime/bot.db"
     assert settings.temp_dir.name == "tmp"
+    assert settings.track_cache_dir.name == "cache"
     assert settings.user_request_cooldown_seconds == 3
     assert settings.ffmpeg_path == "ffmpeg"
     assert settings.ytdlp_path == "yt-dlp"

@@ -141,3 +141,132 @@ async def test_audio_extraction_failure_recovers_on_next_cached_request(service_
     assert refreshed_cache_entry.audio_file_id is not None
     assert service_harness.provider.download_calls[normalized_key] == 2
     assert len(service_harness.gateway.sent_audio_receipts) == 1
+
+
+async def test_tiktok_photo_post_flow(service_harness) -> None:
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(
+            chat_id=1,
+            user_id=301,
+            message_id=16,
+            chat_type="private",
+            text="https://www.tiktok.com/@user/photo/12345",
+        )
+    )
+    assert handled is True
+    assert len(service_harness.gateway.sent_photo_receipts) == 3
+    assert len(service_harness.gateway.sent_audio_receipts) == 1
+
+
+async def test_tiktok_photo_group_falls_back_to_sequential_photos(service_harness) -> None:
+    service_harness.gateway.fail_photo_group_upload = True
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(
+            chat_id=1,
+            user_id=302,
+            message_id=17,
+            chat_type="private",
+            text="https://www.tiktok.com/@user/photo/54321",
+        )
+    )
+    assert len(service_harness.gateway.sent_photo_receipts) == 3
+    assert len(service_harness.gateway.sent_audio_receipts) == 1
+
+
+async def test_tiktok_photo_post_cache_hit_flow(service_harness) -> None:
+    url = "https://www.tiktok.com/@user/photo/123450"
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=305, message_id=18, chat_type="private", text=url)
+    )
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=2, user_id=306, message_id=19, chat_type="private", text=url)
+    )
+    assert service_harness.provider.image_download_calls["tiktok:photo_post:123450"] == 1
+    assert len(service_harness.gateway.sent_photo_receipts) == 6
+
+
+async def test_tiktok_music_only_flow(service_harness) -> None:
+    url = "https://www.tiktok.com/music/original-sound-777777"
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=303, message_id=20, chat_type="private", text=url)
+    )
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=2, user_id=304, message_id=21, chat_type="private", text=url)
+    )
+    assert len(service_harness.gateway.sent_video_receipts) == 0
+    assert len(service_harness.gateway.sent_audio_receipts) == 2
+    assert service_harness.provider.audio_download_calls["tiktok:music_only:777777"] == 1
+
+
+async def test_track_trigger_flow_downloads_and_sends_mp3(service_harness) -> None:
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=401, message_id=22, chat_type="private", text="найти Linkin Park Numb")
+    )
+    assert handled is True
+    assert len(service_harness.gateway.sent_audio_receipts) == 1
+    assert service_harness.gateway.sent_audio_requests[-1].title is not None
+    assert service_harness.gateway.sent_audio_requests[-1].performer is not None
+    cached = await service_harness.track_cache_store.get("linkin park numb")
+    assert cached is not None
+    assert service_harness.track_cache_store.resolve_cached_file(cached).exists()
+    assert len(service_harness.gateway.deleted_messages) == 1
+
+
+async def test_track_trigger_with_leading_spaces_is_handled(service_harness) -> None:
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=402, message_id=23, chat_type="private", text="   песня   Metallica One")
+    )
+    assert handled is True
+    assert len(service_harness.gateway.sent_audio_receipts) == 1
+
+
+async def test_track_trigger_cache_hit_reuses_cached_mp3(service_harness) -> None:
+    text = "трек Metallica One"
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=403, message_id=24, chat_type="private", text=text)
+    )
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=2, user_id=404, message_id=25, chat_type="private", text=text)
+    )
+    assert service_harness.track_client.search_calls["metallica one"] == 1
+    assert len(service_harness.gateway.sent_audio_receipts) == 2
+
+
+async def test_track_trigger_repairs_missing_cached_file(service_harness) -> None:
+    text = "песня Hot Dog Limp Bizkit"
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=405, message_id=26, chat_type="private", text=text)
+    )
+    cached = await service_harness.track_cache_store.get("hot dog limp bizkit")
+    assert cached is not None
+    cached_path = service_harness.track_cache_store.resolve_cached_file(cached)
+    cached_path.unlink()
+
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=2, user_id=406, message_id=27, chat_type="private", text=text)
+    )
+    assert cached_path.exists()
+    assert service_harness.track_client.search_calls["hot dog limp bizkit"] == 1
+
+
+async def test_track_trigger_without_query_returns_friendly_error(service_harness) -> None:
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=407, message_id=28, chat_type="private", text="найти   ")
+    )
+    assert handled is True
+    assert service_harness.gateway.text_messages[-1].text == messages.TRACK_QUERY_EMPTY
+
+
+async def test_tiktok_url_wins_over_track_trigger_when_both_present(service_harness) -> None:
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(
+            chat_id=1,
+            user_id=408,
+            message_id=29,
+            chat_type="private",
+            text="найти https://www.tiktok.com/@user/video/2002",
+        )
+    )
+    assert handled is True
+    assert service_harness.provider.download_calls["tiktok:video:2002"] == 1
+    assert service_harness.track_client.search_calls == {}

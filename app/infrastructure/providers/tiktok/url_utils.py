@@ -17,6 +17,13 @@ VIDEO_ID_PATTERNS = [
     re.compile(r"/embed/v2/(?P<video_id>\d+)", re.IGNORECASE),
     re.compile(r"/video/(?P<video_id>\d+)", re.IGNORECASE),
 ]
+PHOTO_ID_PATTERNS = [
+    re.compile(r"/@[^/]+/photo/(?P<photo_id>\d+)", re.IGNORECASE),
+    re.compile(r"/photo/(?P<photo_id>\d+)", re.IGNORECASE),
+]
+MUSIC_ID_PATTERNS = [
+    re.compile(r"/music/[^/?#]+-(?P<music_id>\d+)", re.IGNORECASE),
+]
 
 
 def extract_candidate_urls(text: str) -> list[str]:
@@ -58,3 +65,24 @@ def extract_video_id(url: str) -> str | None:
             return values[0]
     return None
 
+
+def extract_photo_id(url: str) -> str | None:
+    parsed = urlparse(url)
+    for pattern in PHOTO_ID_PATTERNS:
+        match = pattern.search(parsed.path)
+        if match:
+            return match.group("photo_id")
+    return None
+
+
+def extract_music_id(url: str) -> str | None:
+    parsed = urlparse(url)
+    for pattern in MUSIC_ID_PATTERNS:
+        match = pattern.search(parsed.path)
+        if match:
+            return match.group("music_id")
+    query = parse_qs(parsed.query)
+    values = query.get("music_id")
+    if values:
+        return values[0]
+    return None

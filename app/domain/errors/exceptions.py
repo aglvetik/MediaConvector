@@ -103,3 +103,23 @@ class RateLimitExceededError(AppError):
 class ProcessingConflictError(AppError):
     def __init__(self, message: str = "Message already processed.") -> None:
         super().__init__(message=message, user_message="", error_code="processing_conflict")
+
+
+class InvalidTrackQueryError(AppError):
+    def __init__(self, message: str = "Track query is empty or invalid.") -> None:
+        super().__init__(message=message, user_message=messages.TRACK_QUERY_EMPTY, error_code="invalid_track_query")
+
+
+class TrackNotFoundError(AppError):
+    def __init__(self, message: str = "No suitable track found.") -> None:
+        super().__init__(message=message, user_message=messages.TRACK_NOT_FOUND, error_code="track_not_found")
+
+
+class TrackDownloadError(AppError):
+    def __init__(self, message: str, *, context: dict[str, object] | None = None) -> None:
+        super().__init__(
+            message=message,
+            user_message=messages.TRACK_DOWNLOAD_FAILED,
+            error_code="track_download_failed",
+            context=context or {},
+        )
