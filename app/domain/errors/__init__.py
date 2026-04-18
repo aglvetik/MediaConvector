@@ -5,14 +5,11 @@ from app.domain.errors.exceptions import (
     DownloadError,
     DownloadUnavailableError,
     InvalidCachedMediaError,
-    InvalidTrackQueryError,
     MediaTooLargeError,
     NormalizationError,
     ProcessingConflictError,
     RateLimitExceededError,
     TelegramDeliveryError,
-    TrackDownloadError,
-    TrackNotFoundError,
     UnsupportedUrlError,
 )
 
@@ -23,13 +20,10 @@ __all__ = [
     "DownloadError",
     "DownloadUnavailableError",
     "InvalidCachedMediaError",
-    "InvalidTrackQueryError",
     "MediaTooLargeError",
     "NormalizationError",
     "ProcessingConflictError",
     "RateLimitExceededError",
     "TelegramDeliveryError",
-    "TrackDownloadError",
-    "TrackNotFoundError",
     "UnsupportedUrlError",
 ]

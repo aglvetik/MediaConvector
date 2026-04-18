@@ -66,7 +66,7 @@ async def test_ffmpeg_adapter_transcodes_audio_and_thumbnail(monkeypatch, tmp_pa
     result_audio = await adapter.transcode_audio_to_mp3(
         source_audio,
         mp3_output,
-        normalized_key="music:track:test",
+        normalized_key="tiktok:audio:test",
         title="Track",
         performer="Artist",
         cover_path=source_image,
@@ -74,7 +74,7 @@ async def test_ffmpeg_adapter_transcodes_audio_and_thumbnail(monkeypatch, tmp_pa
     result_thumbnail = await adapter.prepare_audio_thumbnail(
         source_image,
         jpg_output,
-        normalized_key="music:track:test",
+        normalized_key="tiktok:audio:test",
     )
     assert result_audio == mp3_output
     assert result_thumbnail == jpg_output

@@ -11,16 +11,12 @@ from app.application.services.delivery_service import DeliveryService
 from app.application.services.media_pipeline_service import MediaPipelineService
 from app.application.services.metrics_service import MetricsService
 from app.application.services.rate_limit_service import RateLimitService
-from app.application.services.track_pipeline_service import TrackPipelineService
-from app.application.services.track_trigger_service import TrackTriggerService
 from app.application.services.user_request_guard_service import UserRequestGuardService
 from app.domain.entities.media_request import MediaRequest
 from app.domain.entities.media_result import MediaResult
 from app.domain.entities.normalized_resource import NormalizedResource
 from app.domain.errors import AppError
-from app.domain.enums.platform import Platform
 from app.domain.interfaces.provider import DownloaderProvider
-from app.domain.policies import build_cache_key
 from app.domain.interfaces.repositories import ProcessedMessageRepository, RequestLogRepository
 from app.infrastructure.logging import get_logger, log_event
 
@@ -41,8 +37,6 @@ class ProcessMessageService:
         providers: tuple[DownloaderProvider, ...],
         delivery_service: DeliveryService,
         media_pipeline_service: MediaPipelineService,
-        track_trigger_service: TrackTriggerService,
-        track_pipeline_service: TrackPipelineService,
         rate_limit_service: RateLimitService,
         user_request_guard_service: UserRequestGuardService,
         processed_message_repository: ProcessedMessageRepository,
@@ -52,8 +46,6 @@ class ProcessMessageService:
         self._providers = providers
         self._delivery_service = delivery_service
         self._media_pipeline_service = media_pipeline_service
-        self._track_trigger_service = track_trigger_service
-        self._track_pipeline_service = track_pipeline_service
         self._rate_limit_service = rate_limit_service
         self._user_request_guard_service = user_request_guard_service
         self._processed_message_repository = processed_message_repository
@@ -96,46 +88,7 @@ class ProcessMessageService:
                     pipeline_runner=lambda request: self._media_pipeline_service.process(request, provider),
                 )
 
-            track_query = self._track_trigger_service.parse(incoming.text)
-            if track_query is None:
-                return False
-
-            normalized = NormalizedResource(
-                platform=Platform.MUSIC,
-                resource_type="track",
-                resource_id=track_query.normalized_query,
-                normalized_key=build_cache_key(Platform.MUSIC, "track", track_query.normalized_query),
-                original_url=track_query.raw_query,
-                canonical_url=f"ytsearch:{track_query.normalized_query}",
-                title=track_query.raw_query,
-            )
-            normalized_key = normalized.normalized_key
-            log_event(
-                self._logger,
-                logging.INFO,
-                "music_trigger_detected",
-                request_id=request_id,
-                chat_id=incoming.chat_id,
-                user_id=incoming.user_id,
-                trigger=track_query.trigger,
-            )
-            log_event(
-                self._logger,
-                logging.INFO,
-                "music_query_parsed",
-                request_id=request_id,
-                chat_id=incoming.chat_id,
-                user_id=incoming.user_id,
-                normalized_key=normalized.normalized_key,
-                query=track_query.normalized_query,
-            )
-            return await self._execute_flow(
-                request_id=request_id,
-                incoming=incoming,
-                normalized=normalized,
-                loading_text=messages.LOADING_MESSAGE,
-                pipeline_runner=lambda request: self._track_pipeline_service.process(request, track_query),
-            )
+            return False
         except AppError as exc:
             if exc.user_message:
                 await self._safe_send_user_message(incoming.chat_id, exc.user_message, incoming.message_id)
