@@ -6,6 +6,7 @@ Telegram bot for Python 3.11 that automatically detects TikTok URLs in incoming 
 
 - Auto-detects TikTok URLs from plain text messages.
 - Searches music when a message starts with `найти`, `трек`, or `песня`.
+- Resolves multiple music candidates and tries acquisition strategies in order until one succeeds.
 - Works in private chats, groups, and supergroups.
 - Sends `Загрузка 🔎` immediately and removes it best-effort after completion.
 - Sends `Ищу трек 🔎` for music search requests and removes it best-effort after completion.
@@ -15,6 +16,7 @@ Telegram bot for Python 3.11 that automatically detects TikTok URLs in incoming 
 - Sends found tracks as Telegram audio with title, performer, and thumbnail when available.
 - Reuses cached Telegram `file_id` values for repeated requests.
 - Invalidates and rebuilds broken cached media automatically.
+- Tracks YouTube cookies/source health in SQLite and temporarily degrades broken auth paths.
 - Uses only temporary processing files under `TEMP_DIR`.
 - Cleans temporary files on startup and on a periodic worker.
 - Prevents duplicate in-flight processing per normalized TikTok resource.
@@ -31,7 +33,7 @@ The bot has two automatic user-facing flows:
 - the bot processes it without any special command or mention mode
 - send a normal text message starting with `найти`, `трек`, or `песня`
 - the bot extracts the rest of the message as a music query
-- the bot searches the best single match and sends it back as Telegram audio
+- the bot validates the query, resolves several candidates, and tries the configured acquisition strategies until one track can be delivered as Telegram audio
 
 Available service commands:
 
@@ -43,9 +45,9 @@ Available service commands:
 The codebase keeps a layered structure:
 
 - `app/presentation`: aiogram routers and middlewares.
-- `app/application`: orchestration and business workflows for TikTok and music pipelines.
+- `app/application`: orchestration and business workflows for TikTok and music pipelines, including strategy-based music acquisition and source health tracking.
 - `app/domain`: entities, enums, policies, interfaces, typed errors.
-- `app/infrastructure`: Telegram gateway, SQLite repositories, yt-dlp clients, ffmpeg, TikTok provider, YouTube Music-oriented search provider, temp file management, logging.
+- `app/infrastructure`: Telegram gateway, SQLite repositories, yt-dlp clients, ffmpeg, TikTok provider, YouTube-oriented music resolver, cookie provider, temp file management, logging.
 - `app/workers`: periodic cleanup and health workers.
 
 ## Prerequisites
@@ -85,6 +87,12 @@ Supported variables:
 - `USER_REQUEST_COOLDOWN_SECONDS`: soft cooldown between new requests from the same user.
 - `MAX_MUSIC_QUERY_LENGTH`: maximum accepted music search query length.
 - `MUSIC_SEARCH_TIMEOUT_SECONDS`: timeout for the music search provider step.
+- `MUSIC_RESOLVER_MAX_CANDIDATES`: number of resolver candidates to consider for a music request.
+- `MUSIC_STRATEGY_ORDER`: comma-separated acquisition strategy order. Current values: `youtube_cookies`, `youtube_no_cookies`.
+- `YOUTUBE_AUTH_FAIL_THRESHOLD`: consecutive auth-style failures before the cookies strategy is degraded.
+- `YOUTUBE_DEGRADE_TTL_MINUTES`: how long degraded auth state is respected before trying the cookies strategy again.
+- `MUSIC_AUDIO_ONLY`: keep music downloads on an audio-only yt-dlp profile.
+- `COOKIE_HEALTHCHECK_ENABLED`: skip degraded cookie-backed strategy attempts until the TTL expires.
 - `TEMP_FILE_TTL_MINUTES`: temp artifact retention.
 - `CLEANUP_INTERVAL_MINUTES`: cleanup worker interval.
 - `HEALTH_INTERVAL_MINUTES`: health worker interval.
@@ -139,7 +147,7 @@ pytest app/tests/e2e -q
 Current coverage includes:
 
 - URL extraction and normalization.
-- Music trigger parsing, query validation, file-name generation, and per-user request guard logic.
+- Music trigger parsing, hardened query validation, file-name generation, per-user request guard logic, strategy fallback, and source-health degraded-mode recovery.
 - Cache behavior and invalid cached media rebuild.
 - Deduplication and rate limiting.
 - Health-service fallback.
@@ -185,13 +193,17 @@ journalctl -u tiktok-downloader-bot -f
 - Music cache identity is based on normalized keys like `music:ytm:<normalized_query>`.
 - Partial cache records with missing audio are self-healed on later requests when the source is expected to have audio.
 - Music search respects the user query as-is and does not aggressively filter slowed, remix, live, sped-up, nightcore, or lyrics variants.
+- Music resolution now uses several candidates and then tries acquisition strategies in order. The default order is cookies-backed YouTube first, then no-cookies fallback.
+- Cookie-backed strategy health is stored in SQLite. Repeated auth failures move that strategy into a temporary degraded state so the bot stops hammering a broken path on every request.
+- `YTDLP_COOKIES_FILE` is optional, but if you configure it, keep it fresh. The bot can recover from transient auth failures, but stale or invalid cookies still need operator attention.
 - SQLite is intentionally used for the MVP to keep VPS footprint small.
 
 ## Limitations
 
-- TikTok downloads and single-result music search are implemented today.
+- TikTok downloads and resilient music search are implemented today.
 - Polling mode is implemented; webhook support remains a future extension point.
 - `yt-dlp` behavior depends on upstream extractor changes, TikTok anti-bot behavior, and YouTube result availability.
 - Some TikTok resources may require cookies, region affinity, or authentication outside MVP scope.
-- Music search currently returns only the best single result; there is no multi-result selection UI in this version.
+- Music search still returns only one delivered track to the user; there is no multi-result selection UI in this version, even though the backend now evaluates multiple candidates internally.
+- No cookies setup is permanently “set and forget”: the bot degrades and recovers automatically where possible, but expired cookies or upstream YouTube changes can still require operator intervention.
 - SQLite is suitable for a small VPS, but not for large multi-process or high write-concurrency deployments.

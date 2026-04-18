@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     user_request_cooldown_seconds: int = Field(default=3, alias="USER_REQUEST_COOLDOWN_SECONDS")
     max_music_query_length: int = Field(default=120, alias="MAX_MUSIC_QUERY_LENGTH")
     music_search_timeout_seconds: int = Field(default=15, alias="MUSIC_SEARCH_TIMEOUT_SECONDS")
+    music_resolver_max_candidates: int = Field(default=3, alias="MUSIC_RESOLVER_MAX_CANDIDATES")
+    music_strategy_order: str = Field(default="youtube_cookies,youtube_no_cookies", alias="MUSIC_STRATEGY_ORDER")
+    youtube_auth_fail_threshold: int = Field(default=2, alias="YOUTUBE_AUTH_FAIL_THRESHOLD")
+    youtube_degrade_ttl_minutes: int = Field(default=30, alias="YOUTUBE_DEGRADE_TTL_MINUTES")
+    music_audio_only: bool = Field(default=True, alias="MUSIC_AUDIO_ONLY")
+    cookie_healthcheck_enabled: bool = Field(default=True, alias="COOKIE_HEALTHCHECK_ENABLED")
     temp_file_ttl_minutes: int = Field(default=30, alias="TEMP_FILE_TTL_MINUTES")
     cleanup_interval_minutes: int = Field(default=10, alias="CLEANUP_INTERVAL_MINUTES")
     health_interval_minutes: int = Field(default=15, alias="HEALTH_INTERVAL_MINUTES")
@@ -46,6 +52,8 @@ class Settings(BaseSettings):
         "user_request_cooldown_seconds",
         "max_music_query_length",
         "music_search_timeout_seconds",
+        "music_resolver_max_candidates",
+        "youtube_auth_fail_threshold",
     )
     @classmethod
     def _positive_ints(cls, value: int) -> int:
@@ -53,7 +61,13 @@ class Settings(BaseSettings):
             raise ValueError("Concurrency and rate-limit values must be >= 1.")
         return value
 
-    @field_validator("temp_file_ttl_minutes", "cleanup_interval_minutes", "health_interval_minutes", "job_stale_after_minutes")
+    @field_validator(
+        "youtube_degrade_ttl_minutes",
+        "temp_file_ttl_minutes",
+        "cleanup_interval_minutes",
+        "health_interval_minutes",
+        "job_stale_after_minutes",
+    )
     @classmethod
     def _positive_time_values(cls, value: int) -> int:
         if value < 1:
@@ -85,6 +99,17 @@ class Settings(BaseSettings):
         if database_path.is_absolute():
             return database_path
         return Path.cwd() / database_path
+
+    @property
+    def music_strategy_order_list(self) -> tuple[str, ...]:
+        values = tuple(
+            part.strip().lower()
+            for part in self.music_strategy_order.split(",")
+            if part.strip()
+        )
+        if values:
+            return values
+        return ("youtube_cookies", "youtube_no_cookies")
 
 
 def load_settings() -> Settings:

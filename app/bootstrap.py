@@ -12,10 +12,13 @@ from app.application.services import (
     InFlightDedupService,
     MediaPipelineService,
     MetricsService,
+    MusicAcquisitionService,
     MusicPipelineService,
     MusicSearchService,
+    MusicSourceHealthService,
     ProcessMessageService,
     RateLimitService,
+    YoutubeAcquisitionStrategy,
     UserRequestGuardService,
 )
 from app.config import Settings
@@ -25,10 +28,11 @@ from app.infrastructure.persistence.sqlite import (
     Database,
     SqlAlchemyCacheRepository,
     SqlAlchemyDownloadJobRepository,
+    SqlAlchemyMusicSourceStateRepository,
     SqlAlchemyProcessedMessageRepository,
     SqlAlchemyRequestLogRepository,
 )
-from app.infrastructure.providers import TikTokProvider, YouTubeMusicProvider
+from app.infrastructure.providers import StaticCookieFileProvider, TikTokProvider, YouTubeMusicProvider
 from app.infrastructure.telegram import AiogramTelegramGateway
 from app.infrastructure.temp import TempFileManager
 from app.workers import CleanupWorker, HealthWorker
@@ -56,6 +60,7 @@ def build_container(settings: Settings) -> AppContainer:
 
     cache_repository = SqlAlchemyCacheRepository(database)
     download_job_repository = SqlAlchemyDownloadJobRepository(database)
+    music_source_state_repository = SqlAlchemyMusicSourceStateRepository(database)
     processed_message_repository = SqlAlchemyProcessedMessageRepository(database)
     request_log_repository = SqlAlchemyRequestLogRepository(database)
 
@@ -79,12 +84,11 @@ def build_container(settings: Settings) -> AppContainer:
     youtube_music_provider = YouTubeMusicProvider(
         timeout_seconds=settings.music_search_timeout_seconds,
         semaphore=download_semaphore,
-        cookies_file=settings.ytdlp_cookies_file,
     )
     audio_download_client = AudioDownloadClient(
         timeout_seconds=settings.download_timeout_seconds,
         semaphore=download_semaphore,
-        cookies_file=settings.ytdlp_cookies_file,
+        audio_only=settings.music_audio_only,
     )
 
     metrics_service = MetricsService()
@@ -92,8 +96,45 @@ def build_container(settings: Settings) -> AppContainer:
     delivery_service = DeliveryService(gateway)
     dedup_service = InFlightDedupService()
     music_search_service = MusicSearchService(
-        provider=youtube_music_provider,
         max_query_length=settings.max_music_query_length,
+    )
+    music_source_health_service = MusicSourceHealthService(
+        music_source_state_repository,
+        auth_fail_threshold=settings.youtube_auth_fail_threshold,
+        degrade_ttl_minutes=settings.youtube_degrade_ttl_minutes,
+        healthcheck_enabled=settings.cookie_healthcheck_enabled,
+    )
+    strategy_registry: dict[str, YoutubeAcquisitionStrategy] = {
+        "youtube_no_cookies": YoutubeAcquisitionStrategy(
+            name="youtube_no_cookies",
+            provider=youtube_music_provider,
+            downloader=audio_download_client,
+            cookie_provider=None,
+            respect_health_state=False,
+        ),
+    }
+    if settings.ytdlp_cookies_file is not None:
+        cookie_provider = StaticCookieFileProvider(
+            cookies_file=settings.ytdlp_cookies_file,
+            health_service=music_source_health_service,
+        )
+        strategy_registry["youtube_cookies"] = YoutubeAcquisitionStrategy(
+            name="youtube_cookies",
+            provider=youtube_music_provider,
+            downloader=audio_download_client,
+            cookie_provider=cookie_provider,
+            respect_health_state=settings.cookie_healthcheck_enabled,
+        )
+    ordered_music_strategies = tuple(
+        strategy_registry[name]
+        for name in settings.music_strategy_order_list
+        if name in strategy_registry
+    )
+    if not ordered_music_strategies:
+        ordered_music_strategies = (strategy_registry["youtube_no_cookies"],)
+    music_acquisition_service = MusicAcquisitionService(
+        strategies=ordered_music_strategies,
+        max_candidates=settings.music_resolver_max_candidates,
     )
     media_pipeline_service = MediaPipelineService(
         cache_service=cache_service,
@@ -110,9 +151,8 @@ def build_container(settings: Settings) -> AppContainer:
         delivery_service=delivery_service,
         job_repository=download_job_repository,
         temp_file_manager=temp_file_manager,
-        audio_download_client=audio_download_client,
         ffmpeg_adapter=ffmpeg_adapter,
-        music_search_service=music_search_service,
+        music_acquisition_service=music_acquisition_service,
         metrics_service=metrics_service,
     )
     rate_limit_service = RateLimitService(

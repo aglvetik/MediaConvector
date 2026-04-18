@@ -50,5 +50,5 @@ def test_build_music_ytdlp_options_with_missing_cookies_file_logs_and_fails(capl
                 operation="music_search",
             )
 
-    assert exc_info.value.error_code == "music_download_failed"
+    assert exc_info.value.error_code == "cookies_missing"
     assert any(record.msg == "music_ytdlp_cookies_missing" for record in caplog.records)

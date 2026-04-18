@@ -7,6 +7,7 @@ from pathlib import Path
 from app.domain.entities.media_result import DeliveryReceipt, MediaMetadata
 from app.domain.entities.music_track import MusicTrack
 from app.domain.entities.normalized_resource import NormalizedResource
+from app.domain.enums import MusicFailureCode
 from app.domain.enums.platform import Platform
 from app.domain.errors import (
     AudioExtractionError,
@@ -71,39 +72,88 @@ class FakeMusicProvider:
 
     def __init__(self) -> None:
         self.search_calls: dict[str, int] = defaultdict(int)
-        self.results: dict[str, MusicTrack | None] = {}
+        self.search_modes: list[tuple[str, bool]] = []
+        self.results: dict[str, list[MusicTrack] | None] = {}
         self.fail_queries: set[str] = set()
+        self.cookies_fail_queries: set[str] = set()
+        self.no_cookie_fail_queries: set[str] = set()
 
-    async def search_best_match(self, query: str) -> MusicTrack | None:
+    async def resolve_candidates(
+        self,
+        query: str,
+        *,
+        max_candidates: int,
+        cookies_file: Path | None = None,
+    ) -> list[MusicTrack]:
         self.search_calls[query] += 1
+        self.search_modes.append((query, cookies_file is not None))
         if query in self.fail_queries:
             raise MusicDownloadError("search failed")
+        if cookies_file is not None and query in self.cookies_fail_queries:
+            raise MusicDownloadError(
+                "login required",
+                error_code=MusicFailureCode.LOGIN_REQUIRED.value,
+            )
+        if cookies_file is None and query in self.no_cookie_fail_queries:
+            raise MusicDownloadError(
+                "search failed without cookies",
+                error_code=MusicFailureCode.SOURCE_UNAVAILABLE.value,
+            )
         if query in self.results:
-            return self.results[query]
+            predefined = self.results[query]
+            if predefined is None:
+                return []
+            return predefined[:max_candidates]
         source_id = query.casefold().replace(" ", "_")
         title = " ".join(word.capitalize() for word in query.split())
-        return MusicTrack(
-            source_id=source_id,
-            source_url=f"https://www.youtube.com/watch?v={source_id}",
-            canonical_url=f"https://music.youtube.com/watch?v={source_id}",
-            title=title,
-            performer="Test Artist",
-            duration_sec=180,
-            thumbnail_url=f"https://img.example/{source_id}.jpg",
-        )
+        return [
+            MusicTrack(
+                source_id=source_id,
+                source_url=f"https://www.youtube.com/watch?v={source_id}",
+                canonical_url=f"https://music.youtube.com/watch?v={source_id}",
+                title=title,
+                performer="Test Artist",
+                duration_sec=180,
+                thumbnail_url=f"https://img.example/{source_id}.jpg",
+                resolver_name="fake_provider",
+                source_name="youtube",
+                ranking=1,
+            )
+        ]
 
 
 class FakeAudioDownloadClient:
-    def __init__(self) -> None:
+    def __init__(self, *, audio_only: bool = True) -> None:
+        self.audio_only = audio_only
         self.download_calls: dict[str, int] = defaultdict(int)
+        self.download_attempts: list[tuple[str, bool]] = []
         self.thumbnail_calls: dict[str, int] = defaultdict(int)
         self.fail_download_ids: set[str] = set()
+        self.cookies_fail_download_ids: set[str] = set()
+        self.no_cookie_fail_download_ids: set[str] = set()
         self.fail_thumbnail_ids: set[str] = set()
 
-    async def download_audio_source(self, track: MusicTrack, work_dir: Path) -> Path:
+    async def download_audio_source(
+        self,
+        track: MusicTrack,
+        work_dir: Path,
+        *,
+        cookies_file: Path | None = None,
+    ) -> Path:
         self.download_calls[track.source_id] += 1
+        self.download_attempts.append((track.source_id, cookies_file is not None))
         if track.source_id in self.fail_download_ids:
             raise MusicDownloadError("audio download failed")
+        if cookies_file is not None and track.source_id in self.cookies_fail_download_ids:
+            raise MusicDownloadError(
+                "login required",
+                error_code=MusicFailureCode.LOGIN_REQUIRED.value,
+            )
+        if cookies_file is None and track.source_id in self.no_cookie_fail_download_ids:
+            raise MusicDownloadError(
+                "audio download failed without cookies",
+                error_code=MusicFailureCode.SOURCE_UNAVAILABLE.value,
+            )
         path = work_dir / f"{track.source_id}.m4a"
         path.write_bytes(b"music-source-bytes")
         return path

@@ -4,6 +4,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app import messages
+from app.domain.enums import MusicFailureCode
 from app.domain.errors import MusicDownloadError
 from app.infrastructure.logging import log_event
 
@@ -42,6 +44,8 @@ def build_music_ytdlp_options(
         )
         raise MusicDownloadError(
             "Configured yt-dlp cookies file does not exist.",
+            error_code=MusicFailureCode.COOKIES_MISSING.value,
+            user_message=messages.MUSIC_SOURCE_DEGRADED,
             context={"operation": operation, "cookies_file": str(resolved_path)},
         )
 

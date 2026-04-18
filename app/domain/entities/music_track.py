@@ -12,3 +12,6 @@ class MusicTrack:
     performer: str | None = None
     duration_sec: int | None = None
     thumbnail_url: str | None = None
+    resolver_name: str = "unknown"
+    source_name: str = "unknown"
+    ranking: int = 1

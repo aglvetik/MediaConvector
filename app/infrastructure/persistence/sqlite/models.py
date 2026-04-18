@@ -90,3 +90,16 @@ class ProcessedMessageModel(Base):
         UniqueConstraint("chat_id", "message_id", "normalized_key", name="uq_processed_message_identity"),
         Index("ix_processed_messages_status", "status"),
     )
+
+
+class MusicSourceStateModel(Base):
+    __tablename__ = "music_source_states"
+
+    source_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    consecutive_auth_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_auth_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    degraded_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

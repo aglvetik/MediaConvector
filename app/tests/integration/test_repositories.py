@@ -2,15 +2,24 @@ from datetime import datetime, timezone
 
 from app.domain.entities.cache_entry import CacheEntry
 from app.domain.entities.download_job import DownloadJob
+from app.domain.entities.music_source_state import MusicSourceState
 from app.domain.enums.cache_status import CacheStatus
 from app.domain.enums.job_status import JobStatus
+from app.domain.enums.music_source_status import MusicSourceStatus
 from app.domain.enums.platform import Platform
-from app.infrastructure.persistence.sqlite import SqlAlchemyCacheRepository, SqlAlchemyDownloadJobRepository, SqlAlchemyProcessedMessageRepository, SqlAlchemyRequestLogRepository
+from app.infrastructure.persistence.sqlite import (
+    SqlAlchemyCacheRepository,
+    SqlAlchemyDownloadJobRepository,
+    SqlAlchemyMusicSourceStateRepository,
+    SqlAlchemyProcessedMessageRepository,
+    SqlAlchemyRequestLogRepository,
+)
 
 
 async def test_repository_roundtrip(database) -> None:
     cache_repo = SqlAlchemyCacheRepository(database)
     job_repo = SqlAlchemyDownloadJobRepository(database)
+    music_source_repo = SqlAlchemyMusicSourceStateRepository(database)
     processed_repo = SqlAlchemyProcessedMessageRepository(database)
     request_log_repo = SqlAlchemyRequestLogRepository(database)
 
@@ -70,3 +79,21 @@ async def test_repository_roundtrip(database) -> None:
     await request_log_repo.log_started("req-1", 1, 2, 100, "tiktok:video:1", saved.original_url)
     await request_log_repo.log_finished("req-1", success=True, delivery_status="sent_all", cache_hit=False)
     assert await request_log_repo.count_recent() == 1
+
+    persisted_state = await music_source_repo.save(
+        MusicSourceState(
+            source_name="youtube_cookies",
+            status=MusicSourceStatus.SUSPECT,
+            consecutive_auth_failures=1,
+            last_success_at=None,
+            last_auth_failure_at=datetime.now(timezone.utc),
+            degraded_until=None,
+            last_error_code="login_required",
+            last_error_message="login required",
+        )
+    )
+    fetched_state = await music_source_repo.get("youtube_cookies")
+    assert fetched_state is not None
+    assert fetched_state.status == MusicSourceStatus.SUSPECT
+    assert fetched_state.last_error_code == "login_required"
+    assert persisted_state.source_name == fetched_state.source_name

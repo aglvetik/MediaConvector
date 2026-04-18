@@ -45,10 +45,9 @@ def test_music_provider_search_passes_cookiefile_to_youtubedl(monkeypatch: pytes
     provider = YouTubeMusicProvider(
         timeout_seconds=15,
         semaphore=asyncio.Semaphore(1),
-        cookies_file=cookies_file,
     )
 
-    info = provider._search("In the end Linkin Park")
+    info = provider._search("In the end Linkin Park", 1, cookies_file)
 
     assert info["_type"] == "playlist"
     assert captured["url"] == "ytsearch1:In the end Linkin Park"
@@ -86,12 +85,45 @@ def test_music_audio_download_passes_cookiefile_to_youtubedl(monkeypatch: pytest
     client = AudioDownloadClient(
         timeout_seconds=120,
         semaphore=asyncio.Semaphore(1),
-        cookies_file=cookies_file,
+        audio_only=True,
     )
 
-    info = client._download_audio("https://www.youtube.com/watch?v=abc123", work_dir)
+    info = client._download_audio("https://www.youtube.com/watch?v=abc123", work_dir, cookies_file)
 
     assert info["requested_downloads"][0]["filepath"].endswith("source.m4a")
     assert captured["url"] == "https://www.youtube.com/watch?v=abc123"
     assert captured["download"] is True
     assert captured["options"]["cookiefile"] == str(cookies_file.resolve())
+
+
+def test_music_audio_download_prefers_audio_only_format(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    captured: dict[str, object] = {}
+
+    class DummyYDL:
+        def __init__(self, options):
+            captured["options"] = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url: str, download: bool = True):
+            target_path = work_dir / "source.m4a"
+            target_path.write_bytes(b"audio")
+            return {"requested_downloads": [{"filepath": str(target_path)}]}
+
+    monkeypatch.setattr("app.infrastructure.downloaders.audio_download_client.yt_dlp.YoutubeDL", DummyYDL)
+
+    client = AudioDownloadClient(
+        timeout_seconds=120,
+        semaphore=asyncio.Semaphore(1),
+        audio_only=True,
+    )
+
+    client._download_audio("https://www.youtube.com/watch?v=abc123", work_dir, None)
+
+    assert captured["options"]["format"] == "bestaudio/best"

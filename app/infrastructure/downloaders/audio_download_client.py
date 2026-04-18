@@ -10,18 +10,26 @@ import yt_dlp
 
 from app.domain.entities.music_track import MusicTrack
 from app.domain.errors import MusicDownloadError
+from app.domain.enums import MusicFailureCode
+from app.infrastructure.downloaders.ytdlp_music_error_parser import classify_ytdlp_music_error
 from app.infrastructure.logging import get_logger, log_event
 from app.infrastructure.downloaders.ytdlp_music_options import build_music_ytdlp_options
 
 
 class AudioDownloadClient:
-    def __init__(self, *, timeout_seconds: int, semaphore: asyncio.Semaphore, cookies_file: Path | None = None) -> None:
+    def __init__(self, *, timeout_seconds: int, semaphore: asyncio.Semaphore, audio_only: bool = True) -> None:
         self._timeout_seconds = timeout_seconds
         self._semaphore = semaphore
-        self._cookies_file = cookies_file
+        self._audio_only = audio_only
         self._logger = get_logger(__name__)
 
-    async def download_audio_source(self, track: MusicTrack, work_dir: Path) -> Path:
+    async def download_audio_source(
+        self,
+        track: MusicTrack,
+        work_dir: Path,
+        *,
+        cookies_file: Path | None = None,
+    ) -> Path:
         async with self._semaphore:
             log_event(
                 self._logger,
@@ -29,14 +37,20 @@ class AudioDownloadClient:
                 "music_download_started",
                 source_id=track.source_id,
                 canonical_url=track.canonical_url,
+                cookies_enabled=cookies_file is not None,
+                audio_only=self._audio_only,
             )
             try:
                 info = await asyncio.wait_for(
-                    asyncio.to_thread(self._download_audio, track.source_url, work_dir),
+                    asyncio.to_thread(self._download_audio, track.source_url, work_dir, cookies_file),
                     timeout=self._timeout_seconds,
                 )
             except TimeoutError as exc:
-                raise MusicDownloadError("Music audio download timed out.", context={"source_id": track.source_id}) from exc
+                raise MusicDownloadError(
+                    "Music audio download timed out.",
+                    error_code=MusicFailureCode.SOURCE_UNAVAILABLE.value,
+                    context={"source_id": track.source_id},
+                ) from exc
             downloaded_path = self._resolve_downloaded_path(work_dir, info)
             log_event(
                 self._logger,
@@ -64,11 +78,11 @@ class AudioDownloadClient:
             return None
         return target_path
 
-    def _download_audio(self, source_url: str, work_dir: Path) -> dict[str, Any]:
+    def _download_audio(self, source_url: str, work_dir: Path, cookies_file: Path | None) -> dict[str, Any]:
         options: dict[str, Any] = {
             "paths": {"home": str(work_dir)},
             "outtmpl": str(work_dir / "source.%(ext)s"),
-            "format": "bestaudio/best",
+            "format": "bestaudio/best" if self._audio_only else "best",
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
@@ -79,7 +93,7 @@ class AudioDownloadClient:
         }
         options = build_music_ytdlp_options(
             options,
-            cookies_file=self._cookies_file,
+            cookies_file=cookies_file,
             logger=self._logger,
             operation="music_download",
         )
@@ -87,7 +101,12 @@ class AudioDownloadClient:
             with yt_dlp.YoutubeDL(options) as ydl:
                 return ydl.extract_info(source_url, download=True)
         except yt_dlp.utils.DownloadError as exc:
-            raise MusicDownloadError(str(exc), context={"source_url": source_url}) from exc
+            error_code = classify_ytdlp_music_error(str(exc))
+            raise MusicDownloadError(
+                str(exc),
+                error_code=error_code.value,
+                context={"source_url": source_url},
+            ) from exc
 
     @staticmethod
     def _resolve_downloaded_path(work_dir: Path, info: dict[str, Any]) -> Path:

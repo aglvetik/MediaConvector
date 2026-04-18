@@ -9,10 +9,18 @@ from sqlalchemy.exc import IntegrityError
 
 from app.domain.entities.cache_entry import CacheEntry
 from app.domain.entities.download_job import DownloadJob
+from app.domain.entities.music_source_state import MusicSourceState
 from app.domain.enums.cache_status import CacheStatus
 from app.domain.enums.job_status import JobStatus
+from app.domain.enums.music_source_status import MusicSourceStatus
 from app.domain.enums.platform import Platform
-from app.infrastructure.persistence.sqlite.models import DownloadJobModel, MediaCacheModel, ProcessedMessageModel, RequestLogModel
+from app.infrastructure.persistence.sqlite.models import (
+    DownloadJobModel,
+    MediaCacheModel,
+    MusicSourceStateModel,
+    ProcessedMessageModel,
+    RequestLogModel,
+)
 from app.infrastructure.persistence.sqlite.session import Database
 
 
@@ -45,6 +53,19 @@ def _to_cache_entity(model: MediaCacheModel) -> CacheEntry:
         thumbnail_url=model.thumbnail_url,
         has_thumbnail=model.has_thumbnail,
         file_name=model.file_name,
+    )
+
+
+def _to_music_source_state_entity(model: MusicSourceStateModel) -> MusicSourceState:
+    return MusicSourceState(
+        source_name=model.source_name,
+        status=MusicSourceStatus(model.status),
+        consecutive_auth_failures=model.consecutive_auth_failures,
+        last_success_at=model.last_success_at,
+        last_auth_failure_at=model.last_auth_failure_at,
+        degraded_until=model.degraded_until,
+        last_error_code=model.last_error_code,
+        last_error_message=model.last_error_message,
     )
 
 
@@ -400,3 +421,49 @@ class SqlAlchemyRequestLogRepository:
         async with self._database.session() as session:
             result = await session.execute(select(func.count()).select_from(RequestLogModel))
             return int(result.scalar_one())
+
+
+class SqlAlchemyMusicSourceStateRepository:
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    async def get(self, source_name: str) -> MusicSourceState | None:
+        async with self._database.session() as session:
+            result = await session.execute(
+                select(MusicSourceStateModel).where(MusicSourceStateModel.source_name == source_name)
+            )
+            model = result.scalar_one_or_none()
+            return _to_music_source_state_entity(model) if model else None
+
+    async def save(self, state: MusicSourceState) -> MusicSourceState:
+        async with self._database.session() as session:
+            stmt = insert(MusicSourceStateModel).values(
+                source_name=state.source_name,
+                status=state.status.value,
+                consecutive_auth_failures=state.consecutive_auth_failures,
+                last_success_at=state.last_success_at,
+                last_auth_failure_at=state.last_auth_failure_at,
+                degraded_until=state.degraded_until,
+                last_error_code=state.last_error_code,
+                last_error_message=state.last_error_message,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[MusicSourceStateModel.source_name],
+                set_={
+                    "status": state.status.value,
+                    "consecutive_auth_failures": state.consecutive_auth_failures,
+                    "last_success_at": state.last_success_at,
+                    "last_auth_failure_at": state.last_auth_failure_at,
+                    "degraded_until": state.degraded_until,
+                    "last_error_code": state.last_error_code,
+                    "last_error_message": state.last_error_message,
+                    "updated_at": datetime.now(timezone.utc),
+                },
+            )
+            await session.execute(stmt)
+            await session.commit()
+
+        saved = await self.get(state.source_name)
+        if saved is None:
+            raise RuntimeError("Failed to save music source state.")
+        return saved

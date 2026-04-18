@@ -4,6 +4,7 @@ from typing import Protocol
 
 from app.domain.entities.cache_entry import CacheEntry
 from app.domain.entities.download_job import DownloadJob
+from app.domain.entities.music_source_state import MusicSourceState
 from app.domain.enums.cache_status import CacheStatus
 from app.domain.enums.job_status import JobStatus
 
@@ -84,4 +85,12 @@ class RequestLogRepository(Protocol):
         ...
 
     async def count_recent(self) -> int:
+        ...
+
+
+class MusicSourceStateRepository(Protocol):
+    async def get(self, source_name: str) -> MusicSourceState | None:
+        ...
+
+    async def save(self, state: MusicSourceState) -> MusicSourceState:
         ...

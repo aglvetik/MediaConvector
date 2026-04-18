@@ -193,6 +193,14 @@ async def test_music_empty_query_flow(service_harness) -> None:
     assert service_harness.gateway.text_messages[-1].text == messages.music_empty_query("найти")
 
 
+async def test_music_garbage_query_flow(service_harness) -> None:
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=304, message_id=221, chat_type="private", text="песня .")
+    )
+    assert handled is True
+    assert service_harness.gateway.text_messages[-1].text == messages.MUSIC_QUERY_TOO_SHORT
+
+
 async def test_music_no_result_found_flow(service_harness) -> None:
     service_harness.music_provider.results["ghost query"] = None
     handled = await service_harness.process_message_service.handle_message(

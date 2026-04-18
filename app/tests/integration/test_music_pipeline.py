@@ -1,4 +1,5 @@
 from app.application.services.process_message_service import IncomingMessage
+from app.domain.entities.music_track import MusicTrack
 
 
 async def test_music_audio_cache_reuse(service_harness) -> None:
@@ -47,3 +48,60 @@ async def test_music_audio_send_metadata_and_filename(service_harness) -> None:
     assert audio_send.title == "After Dark"
     assert audio_send.performer == "Test Artist"
     assert audio_send.file_name == "Test Artist - After Dark.mp3"
+
+
+async def test_music_strategy_fallback_uses_no_cookie_download_after_cookie_failure(service_harness) -> None:
+    query = "найти fallback anthem"
+    service_harness.audio_downloader.cookies_fail_download_ids.add("fallback_anthem")
+
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=505, message_id=7, chat_type="private", text=query)
+    )
+
+    assert service_harness.audio_downloader.download_attempts == [
+        ("fallback_anthem", True),
+        ("fallback_anthem", False),
+    ]
+    assert service_harness.gateway.audio_sends[-1].title == "Fallback Anthem"
+
+
+async def test_music_pipeline_tries_next_candidate_when_first_candidate_fails(service_harness) -> None:
+    query = "найти complex fallback"
+    service_harness.music_provider.results["complex fallback"] = [
+        MusicTrack(
+            source_id="first_candidate",
+            source_url="https://www.youtube.com/watch?v=first_candidate",
+            canonical_url="https://music.youtube.com/watch?v=first_candidate",
+            title="First Candidate",
+            performer="Artist",
+            duration_sec=180,
+            thumbnail_url=None,
+            resolver_name="fake_provider",
+            source_name="youtube",
+            ranking=1,
+        ),
+        MusicTrack(
+            source_id="second_candidate",
+            source_url="https://www.youtube.com/watch?v=second_candidate",
+            canonical_url="https://music.youtube.com/watch?v=second_candidate",
+            title="Second Candidate",
+            performer="Artist",
+            duration_sec=180,
+            thumbnail_url=None,
+            resolver_name="fake_provider",
+            source_name="youtube",
+            ranking=2,
+        ),
+    ]
+    service_harness.audio_downloader.fail_download_ids.add("first_candidate")
+
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=506, message_id=8, chat_type="private", text=query)
+    )
+
+    assert service_harness.gateway.audio_sends[-1].title == "Second Candidate"
+    assert [attempt[0] for attempt in service_harness.audio_downloader.download_attempts] == [
+        "first_candidate",
+        "first_candidate",
+        "second_candidate",
+    ]

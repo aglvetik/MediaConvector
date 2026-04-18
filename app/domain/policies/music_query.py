@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unicodedata
+from dataclasses import dataclass
 
 from app.domain.entities.music_search_query import MusicSearchQuery
 from app.domain.entities.normalized_resource import NormalizedResource
@@ -8,6 +9,12 @@ from app.domain.enums.platform import Platform
 from app.domain.policies.cache_key import build_cache_key
 
 MUSIC_TRIGGERS = ("найти", "трек", "песня")
+
+
+@dataclass(slots=True, frozen=True)
+class MusicQueryValidationResult:
+    normalized_query: str
+    meaningful_characters: int
 
 
 def parse_music_trigger(text: str) -> tuple[str, str] | None:
@@ -27,8 +34,17 @@ def normalize_music_query(query: str) -> str:
     return " ".join(normalized.casefold().split())
 
 
+def validate_music_query(query: str) -> MusicQueryValidationResult:
+    normalized_query = normalize_music_query(query)
+    meaningful_characters = sum(1 for character in normalized_query if character.isalnum())
+    return MusicQueryValidationResult(
+        normalized_query=normalized_query,
+        meaningful_characters=meaningful_characters,
+    )
+
+
 def build_music_search_query(trigger: str, raw_query: str) -> MusicSearchQuery:
-    normalized_query = normalize_music_query(raw_query)
+    normalized_query = validate_music_query(raw_query).normalized_query
     normalized_resource = NormalizedResource(
         platform=Platform.MUSIC,
         resource_type="ytm",

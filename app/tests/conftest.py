@@ -12,16 +12,21 @@ from app.application.services import (
     InFlightDedupService,
     MediaPipelineService,
     MetricsService,
+    MusicAcquisitionService,
     MusicPipelineService,
     MusicSearchService,
+    MusicSourceHealthService,
     ProcessMessageService,
     RateLimitService,
+    YoutubeAcquisitionStrategy,
     UserRequestGuardService,
 )
+from app.infrastructure.providers.music.static_cookie_file_provider import StaticCookieFileProvider
 from app.infrastructure.persistence.sqlite import (
     Database,
     SqlAlchemyCacheRepository,
     SqlAlchemyDownloadJobRepository,
+    SqlAlchemyMusicSourceStateRepository,
     SqlAlchemyProcessedMessageRepository,
     SqlAlchemyRequestLogRepository,
 )
@@ -56,6 +61,8 @@ class ServiceHarness:
     cache_repository: SqlAlchemyCacheRepository
     request_log_repository: SqlAlchemyRequestLogRepository
     job_repository: SqlAlchemyDownloadJobRepository
+    music_source_state_repository: SqlAlchemyMusicSourceStateRepository
+    cookies_file: Path
 
 
 @pytest_asyncio.fixture
@@ -63,16 +70,19 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
     cache_repository = SqlAlchemyCacheRepository(database)
     request_log_repository = SqlAlchemyRequestLogRepository(database)
     job_repository = SqlAlchemyDownloadJobRepository(database)
+    music_source_state_repository = SqlAlchemyMusicSourceStateRepository(database)
     processed_message_repository = SqlAlchemyProcessedMessageRepository(database)
     gateway = FakeGateway()
     provider = FakeProvider()
     music_provider = FakeMusicProvider()
-    audio_downloader = FakeAudioDownloadClient()
+    audio_downloader = FakeAudioDownloadClient(audio_only=True)
     ffmpeg = FakeFfmpegAdapter()
     metrics = MetricsService()
     cache_service = CacheService(cache_repository)
     delivery_service = DeliveryService(gateway)
     temp_manager = TempFileManager(tmp_path / "tmp", ttl_minutes=30)
+    cookies_file = tmp_path / "cookies.txt"
+    cookies_file.write_text("# Netscape HTTP Cookie File", encoding="utf-8")
     dedup_service = InFlightDedupService()
     media_pipeline_service = MediaPipelineService(
         cache_service=cache_service,
@@ -83,16 +93,44 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
         temp_file_manager=temp_manager,
         metrics_service=metrics,
     )
-    music_search_service = MusicSearchService(provider=music_provider, max_query_length=120)
+    music_search_service = MusicSearchService(max_query_length=120)
+    music_source_health_service = MusicSourceHealthService(
+        music_source_state_repository,
+        auth_fail_threshold=2,
+        degrade_ttl_minutes=30,
+        healthcheck_enabled=True,
+    )
+    cookie_provider = StaticCookieFileProvider(
+        cookies_file=cookies_file,
+        health_service=music_source_health_service,
+    )
+    music_acquisition_service = MusicAcquisitionService(
+        strategies=(
+            YoutubeAcquisitionStrategy(
+                name="youtube_cookies",
+                provider=music_provider,
+                downloader=audio_downloader,
+                cookie_provider=cookie_provider,
+                respect_health_state=True,
+            ),
+            YoutubeAcquisitionStrategy(
+                name="youtube_no_cookies",
+                provider=music_provider,
+                downloader=audio_downloader,
+                cookie_provider=None,
+                respect_health_state=False,
+            ),
+        ),
+        max_candidates=3,
+    )
     music_pipeline_service = MusicPipelineService(
         cache_service=cache_service,
         dedup_service=dedup_service,
         delivery_service=delivery_service,
         job_repository=job_repository,
         temp_file_manager=temp_manager,
-        audio_download_client=audio_downloader,
         ffmpeg_adapter=ffmpeg,
-        music_search_service=music_search_service,
+        music_acquisition_service=music_acquisition_service,
         metrics_service=metrics,
     )
     process_message_service = ProcessMessageService(
@@ -121,4 +159,6 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
         cache_repository=cache_repository,
         request_log_repository=request_log_repository,
         job_repository=job_repository,
+        music_source_state_repository=music_source_state_repository,
+        cookies_file=cookies_file,
     )

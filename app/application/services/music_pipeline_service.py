@@ -10,11 +10,11 @@ from app.domain.entities.download_job import DownloadJob
 from app.domain.entities.media_request import MediaRequest
 from app.domain.entities.media_result import MediaResult
 from app.domain.entities.music_search_query import MusicSearchQuery
+from app.domain.entities.music_track import MusicTrack
 from app.domain.errors import AudioExtractionError, InvalidCachedMediaError, MusicDownloadError
 from app.domain.enums.job_status import JobStatus
 from app.domain.interfaces.repositories import DownloadJobRepository
 from app.domain.policies import build_safe_file_stem, build_track_file_name
-from app.infrastructure.downloaders.audio_download_client import AudioDownloadClient
 from app.infrastructure.logging import get_logger, log_event
 from app.infrastructure.media import FfmpegAdapter
 from app.infrastructure.temp import TempFileManager
@@ -23,7 +23,7 @@ from app.application.services.cache_service import CacheService
 from app.application.services.dedup_service import InFlightDedupService
 from app.application.services.delivery_service import DeliveryService
 from app.application.services.metrics_service import MetricsService
-from app.application.services.music_search_service import MusicSearchService
+from app.application.services.music_acquisition_service import MusicAcquisitionService
 
 
 @dataclass(slots=True)
@@ -41,9 +41,8 @@ class MusicPipelineService:
         delivery_service: DeliveryService,
         job_repository: DownloadJobRepository,
         temp_file_manager: TempFileManager,
-        audio_download_client: AudioDownloadClient,
         ffmpeg_adapter: FfmpegAdapter,
-        music_search_service: MusicSearchService,
+        music_acquisition_service: MusicAcquisitionService,
         metrics_service: MetricsService,
     ) -> None:
         self._cache_service = cache_service
@@ -51,9 +50,8 @@ class MusicPipelineService:
         self._delivery_service = delivery_service
         self._job_repository = job_repository
         self._temp_file_manager = temp_file_manager
-        self._audio_download_client = audio_download_client
         self._ffmpeg_adapter = ffmpeg_adapter
-        self._music_search_service = music_search_service
+        self._music_acquisition_service = music_acquisition_service
         self._metrics = metrics_service
         self._logger = get_logger(__name__)
 
@@ -116,11 +114,17 @@ class MusicPipelineService:
         )
         work_dir = await self._temp_file_manager.create_work_dir(f"{request.request_id}-music")
         try:
-            track = await self._music_search_service.search_best_match(query)
-            source_audio_path = await self._audio_download_client.download_audio_source(track, work_dir)
+            acquisition = await self._music_acquisition_service.acquire(query, work_dir)
+            track = acquisition.track
             file_name = build_track_file_name(track)
             output_stem = build_safe_file_stem(Path(file_name).stem, fallback=track.source_id)
-            output_path = await self._transcode_audio(source_audio_path, work_dir / f"{output_stem}.mp3", request.normalized_resource.normalized_key, track.title, track.performer)
+            output_path = await self._transcode_audio(
+                acquisition.source_audio_path,
+                work_dir / f"{output_stem}.mp3",
+                request.normalized_resource.normalized_key,
+                track.title,
+                track.performer,
+            )
             thumbnail_path = await self._prepare_thumbnail(track, work_dir, request.normalized_resource.normalized_key)
             media_result = await self._delivery_service.deliver_music_upload(
                 request,
@@ -179,10 +183,14 @@ class MusicPipelineService:
                 context={"normalized_key": normalized_key, "error_code": exc.error_code},
             ) from exc
 
-    async def _prepare_thumbnail(self, track, work_dir: Path, normalized_key: str) -> Path | None:
+    async def _prepare_thumbnail(self, track: MusicTrack, work_dir: Path, normalized_key: str) -> Path | None:
         if track.thumbnail_url is None:
             return None
-        downloaded_thumbnail = await self._audio_download_client.download_thumbnail(track.thumbnail_url, work_dir, fallback_stem=track.source_id)
+        downloaded_thumbnail = await self._music_acquisition_service.download_thumbnail(
+            track.thumbnail_url,
+            work_dir,
+            fallback_stem=track.source_id,
+        )
         if downloaded_thumbnail is None:
             return None
         output_path = work_dir / f"{build_safe_file_stem(track.source_id, fallback='cover')}-cover.jpg"
