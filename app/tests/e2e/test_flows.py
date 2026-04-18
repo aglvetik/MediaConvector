@@ -2,6 +2,8 @@ import asyncio
 
 from app import messages
 from app.application.services.process_message_service import IncomingMessage
+from app.domain.entities.track_search_candidate import TrackSearchCandidate
+from app.domain.errors import TrackDownloadError
 
 
 async def test_private_chat_success_flow(service_harness) -> None:
@@ -249,9 +251,51 @@ async def test_track_trigger_repairs_missing_cached_file(service_harness) -> Non
     assert service_harness.track_client.search_calls["hot dog limp bizkit"] == 1
 
 
+async def test_track_trigger_tries_next_candidate_when_first_download_fails(service_harness) -> None:
+    service_harness.track_client.search_map["linkin park somewhere i belong"] = [
+        TrackSearchCandidate(
+            source_id="bad1",
+            source_url="https://youtube.local/bad1",
+            title="Linkin Park - Somewhere I Belong",
+            uploader="Uploader",
+            thumbnail_url=None,
+            duration_sec=210,
+            score=100,
+        ),
+        TrackSearchCandidate(
+            source_id="good2",
+            source_url="https://youtube.local/good2",
+            title="Linkin Park - Somewhere I Belong",
+            uploader="Uploader",
+            thumbnail_url=None,
+            duration_sec=211,
+            score=99,
+        ),
+    ]
+    service_harness.track_client.fail_source_urls["https://youtube.local/bad1"] = TrackDownloadError(
+        "Requested format is not available. Use --list-formats for a list of available formats",
+        context={"format_unavailable": True},
+    )
+
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(
+            chat_id=1,
+            user_id=406,
+            message_id=28,
+            chat_type="private",
+            text="найти Linkin Park Somewhere I Belong",
+        )
+    )
+
+    assert handled is True
+    assert service_harness.track_client.download_calls["https://youtube.local/bad1"] == 1
+    assert service_harness.track_client.download_calls["https://youtube.local/good2"] == 1
+    assert len(service_harness.gateway.sent_audio_receipts) == 1
+
+
 async def test_track_trigger_without_query_returns_friendly_error(service_harness) -> None:
     handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=407, message_id=28, chat_type="private", text="найти   ")
+        IncomingMessage(chat_id=1, user_id=407, message_id=29, chat_type="private", text="найти   ")
     )
     assert handled is True
     assert service_harness.gateway.text_messages[-1].text == messages.TRACK_QUERY_EMPTY
@@ -262,7 +306,7 @@ async def test_tiktok_url_wins_over_track_trigger_when_both_present(service_harn
         IncomingMessage(
             chat_id=1,
             user_id=408,
-            message_id=29,
+            message_id=30,
             chat_type="private",
             text="найти https://www.tiktok.com/@user/video/2002",
         )

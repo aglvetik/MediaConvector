@@ -103,60 +103,123 @@ class TrackPipelineService:
     ) -> TrackOwnerResult:
         work_dir = await self._temp_file_manager.create_work_dir(f"{request.request_id}-track")
         try:
-            candidate = await self._resolve_candidate(request, query, cached_entry)
-            title, performer = derive_track_metadata(candidate)
-            source_path = await self._track_client.download_audio(
-                candidate.source_url,
-                work_dir,
-                normalized_key=request.normalized_resource.normalized_key,
-            )
-            prepared_thumbnail = await self._prepare_thumbnail(candidate, work_dir, request)
-            final_audio = await self._build_mp3(
-                source_path=source_path,
-                normalized_key=request.normalized_resource.normalized_key,
-                title=title,
-                performer=performer,
-                prepared_thumbnail=prepared_thumbnail,
-                destination=self._track_cache_store.build_target_path(query.normalized_query),
-                work_dir=work_dir,
-            )
-            cache_entry = TrackCacheEntry(
-                normalized_query=query.normalized_query,
-                file_path=_to_cache_path(final_audio),
-                title=title,
-                uploader=performer,
-                source_url=candidate.source_url,
-            )
-            await self._track_cache_store.set(cache_entry)
-            media_result = await self._delivery_service.deliver_audio_only(
-                request,
-                final_audio,
-                title=title,
-                performer=performer,
-                thumbnail_path=prepared_thumbnail,
-                failure_notice=messages.TRACK_DOWNLOAD_FAILED,
-            )
-            return TrackOwnerResult(media_result=media_result, cache_entry=cache_entry)
+            candidates = self._build_cached_candidates(query, cached_entry)
+            searched_youtube = False
+            last_error: TrackDownloadError | None = None
+            attempted_urls: set[str] = set()
+            candidate_index = 0
+            while True:
+                if not candidates and not searched_youtube:
+                    candidates = await self._search_candidates(request, query, attempted_urls)
+                    searched_youtube = True
+                if not candidates:
+                    break
+                for candidate in candidates:
+                    candidate_index += 1
+                    attempted_urls.add(candidate.source_url)
+                    log_event(
+                        self._logger,
+                        20,
+                        "music_candidate_selected",
+                        normalized_key=request.normalized_resource.normalized_key,
+                        candidate_index=candidate_index,
+                        source_id=candidate.source_id,
+                        title=candidate.title,
+                        uploader=candidate.uploader,
+                        source_url=candidate.source_url,
+                        score=candidate.score,
+                    )
+                    try:
+                        title, performer = derive_track_metadata(candidate)
+                        source_path = await self._track_client.download_audio(
+                            candidate.source_url,
+                            work_dir,
+                            normalized_key=request.normalized_resource.normalized_key,
+                        )
+                        prepared_thumbnail = await self._prepare_thumbnail(candidate, work_dir, request)
+                        final_audio = await self._build_mp3(
+                            source_path=source_path,
+                            normalized_key=request.normalized_resource.normalized_key,
+                            title=title,
+                            performer=performer,
+                            prepared_thumbnail=prepared_thumbnail,
+                            destination=self._track_cache_store.build_target_path(query.normalized_query),
+                            work_dir=work_dir,
+                        )
+                        cache_entry = TrackCacheEntry(
+                            normalized_query=query.normalized_query,
+                            file_path=_to_cache_path(final_audio),
+                            title=title,
+                            uploader=performer,
+                            source_url=candidate.source_url,
+                        )
+                        await self._track_cache_store.set(cache_entry)
+                        media_result = await self._delivery_service.deliver_audio_only(
+                            request,
+                            final_audio,
+                            title=title,
+                            performer=performer,
+                            thumbnail_path=prepared_thumbnail,
+                            failure_notice=messages.TRACK_DOWNLOAD_FAILED,
+                        )
+                        return TrackOwnerResult(media_result=media_result, cache_entry=cache_entry)
+                    except TrackDownloadError as exc:
+                        last_error = exc
+                        log_event(
+                            self._logger,
+                            30,
+                            "music_candidate_failed",
+                            normalized_key=request.normalized_resource.normalized_key,
+                            candidate_index=candidate_index,
+                            source_id=candidate.source_id,
+                            source_url=candidate.source_url,
+                            error=str(exc),
+                            format_unavailable=bool(exc.context.get("format_unavailable")),
+                        )
+                        continue
+                candidates = ()
+            if last_error is not None:
+                raise last_error
+            raise TrackDownloadError("No downloadable YouTube candidates were found.")
         finally:
             await self._temp_file_manager.remove_dir(work_dir)
 
-    async def _resolve_candidate(
+    def _build_cached_candidates(
+        self,
+        query: TrackQuery,
+        cached_entry: TrackCacheEntry | None,
+    ) -> list[TrackSearchCandidate]:
+        candidates: list[TrackSearchCandidate] = []
+        if cached_entry is not None and cached_entry.source_url:
+            candidates.append(
+                TrackSearchCandidate(
+                    source_id=query.normalized_query,
+                    source_url=cached_entry.source_url,
+                    title=cached_entry.title,
+                    uploader=cached_entry.uploader,
+                    thumbnail_url=None,
+                    duration_sec=None,
+                    score=0,
+                )
+            )
+        return candidates
+
+    async def _search_candidates(
         self,
         request: MediaRequest,
         query: TrackQuery,
-        cached_entry: TrackCacheEntry | None,
-    ) -> TrackSearchCandidate:
-        if cached_entry is not None and cached_entry.source_url:
-            return TrackSearchCandidate(
-                source_id=query.normalized_query,
-                source_url=cached_entry.source_url,
-                title=cached_entry.title,
-                uploader=cached_entry.uploader,
-                thumbnail_url=None,
-                duration_sec=None,
-                score=0,
-            )
-        return await self._track_client.search(query.raw_query, normalized_key=request.normalized_resource.normalized_key)
+        attempted_urls: set[str],
+    ) -> tuple[TrackSearchCandidate, ...]:
+        candidates = await self._track_client.search_candidates(
+            query.raw_query,
+            normalized_key=request.normalized_resource.normalized_key,
+        )
+        deduped: list[TrackSearchCandidate] = []
+        for candidate in candidates:
+            if not candidate.source_url or candidate.source_url in attempted_urls:
+                continue
+            deduped.append(candidate)
+        return tuple(deduped)
 
     async def _prepare_thumbnail(
         self,

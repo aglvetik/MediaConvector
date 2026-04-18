@@ -32,7 +32,7 @@ class YoutubeTrackClient:
         self._max_duration_seconds = max_duration_seconds
         self._logger = get_logger(__name__)
 
-    async def search(self, query: str, *, normalized_key: str) -> TrackSearchCandidate:
+    async def search_candidates(self, query: str, *, normalized_key: str) -> list[TrackSearchCandidate]:
         async with self._semaphore:
             cookiefile = self._resolve_cookiefile(operation="track_search")
             log_event(
@@ -74,6 +74,10 @@ class YoutubeTrackClient:
             query=query,
             candidates=len(ranked),
         )
+        return ranked
+
+    async def search(self, query: str, *, normalized_key: str) -> TrackSearchCandidate:
+        ranked = await self.search_candidates(query, normalized_key=normalized_key)
         if not ranked:
             raise TrackNotFoundError()
         candidate = ranked[0]
@@ -84,38 +88,81 @@ class YoutubeTrackClient:
             normalized_key=normalized_key,
             source_url=candidate.source_url,
             title=candidate.title,
+            uploader=candidate.uploader,
+            source_id=candidate.source_id,
             score=candidate.score,
         )
         return candidate
 
     async def download_audio(self, source_url: str, work_dir: Path, *, normalized_key: str) -> Path:
-        async with self._semaphore:
-            cookiefile = self._resolve_cookiefile(operation="track_download")
+        format_selectors: tuple[str | None, ...] = ("bestaudio/best", "best", None)
+        last_error: TrackDownloadError | None = None
+
+        for format_selector in format_selectors:
+            async with self._semaphore:
+                cookiefile = self._resolve_cookiefile(operation="track_download")
+                selector_label = format_selector or "<default>"
+                log_event(
+                    self._logger,
+                    20,
+                    "music_download_started",
+                    normalized_key=normalized_key,
+                    source_url=source_url,
+                    cookies_enabled=cookiefile is not None,
+                    cookies_path=str(cookiefile) if cookiefile is not None else None,
+                    format_selector=selector_label,
+                )
+                log_event(
+                    self._logger,
+                    20,
+                    "music_download_format_attempt",
+                    normalized_key=normalized_key,
+                    source_url=source_url,
+                    format_selector=selector_label,
+                )
+                try:
+                    info = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._extract_info,
+                            source_url,
+                            True,
+                            work_dir,
+                            "track_download",
+                            format_selector,
+                        ),
+                        timeout=self._timeout_seconds,
+                    )
+                except TimeoutError as exc:
+                    raise TrackDownloadError("YouTube download timed out.") from exc
+                except TrackDownloadError as exc:
+                    last_error = exc
+                    if exc.context.get("format_unavailable"):
+                        log_event(
+                            self._logger,
+                            30,
+                            "music_download_format_fallback",
+                            normalized_key=normalized_key,
+                            source_url=source_url,
+                            format_selector=selector_label,
+                            reason="format_unavailable",
+                        )
+                        continue
+                    raise
+
+            downloaded_path = self._resolve_downloaded_path(work_dir, info)
             log_event(
                 self._logger,
                 20,
-                "music_download_started",
+                "music_download_completed",
                 normalized_key=normalized_key,
-                source_url=source_url,
-                cookies_enabled=cookiefile is not None,
-                cookies_path=str(cookiefile) if cookiefile is not None else None,
+                file_path=str(downloaded_path),
+                format_selector=format_selector or "<default>",
             )
-            try:
-                info = await asyncio.wait_for(
-                    asyncio.to_thread(self._extract_info, source_url, True, work_dir, "track_download"),
-                    timeout=self._timeout_seconds,
-                )
-            except TimeoutError as exc:
-                raise TrackDownloadError("YouTube download timed out.") from exc
-        downloaded_path = self._resolve_downloaded_path(work_dir, info)
-        log_event(
-            self._logger,
-            20,
-            "music_download_completed",
-            normalized_key=normalized_key,
-            file_path=str(downloaded_path),
-        )
-        return downloaded_path
+            return downloaded_path
+
+        if last_error is not None:
+            raise last_error
+        raise TrackDownloadError("yt-dlp did not produce a downloadable track.")
 
     async def download_thumbnail(self, thumbnail_url: str, destination: Path) -> Path:
         try:
@@ -127,12 +174,28 @@ class YoutubeTrackClient:
         destination.write_bytes(response.content)
         return destination
 
-    def _extract_info(self, url: str, download: bool, work_dir: Path | None, operation: str) -> dict[str, Any]:
-        options = self._build_options(download=download, work_dir=work_dir, operation=operation)
+    def _extract_info(
+        self,
+        url: str,
+        download: bool,
+        work_dir: Path | None,
+        operation: str,
+        format_selector: str | None = "bestaudio/best",
+    ) -> dict[str, Any]:
+        options = self._build_options(
+            download=download,
+            work_dir=work_dir,
+            operation=operation,
+            format_selector=format_selector,
+        )
         try:
             with yt_dlp.YoutubeDL(options) as ydl:
                 return ydl.extract_info(url, download=download)
         except yt_dlp.utils.DownloadError as exc:
+            error_text = str(exc)
+            context: dict[str, object] = {"operation": operation}
+            if self._is_unavailable_format_error(error_text):
+                context["format_unavailable"] = True
             log_event(
                 self._logger,
                 40,
@@ -141,15 +204,23 @@ class YoutubeTrackClient:
                 url=url,
                 cookies_enabled="cookiefile" in options,
                 cookies_path=options.get("cookiefile"),
-                error_text=str(exc),
+                format_selector=options.get("format"),
+                error_text=error_text,
             )
-            raise TrackDownloadError(str(exc), context={"operation": operation}) from exc
+            raise TrackDownloadError(error_text, context=context) from exc
 
-    def _build_options(self, *, download: bool, work_dir: Path | None, operation: str) -> dict[str, Any]:
+    def _build_options(
+        self,
+        *,
+        download: bool,
+        work_dir: Path | None,
+        operation: str,
+        format_selector: str | None = "bestaudio/best",
+    ) -> dict[str, Any]:
         options: dict[str, Any] = {
             "paths": {"home": str(work_dir)} if work_dir is not None else None,
             "outtmpl": str(work_dir / "%(id)s.%(ext)s") if work_dir is not None else None,
-            "format": "bestaudio/best",
+            "format": format_selector,
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
@@ -181,8 +252,8 @@ class YoutubeTrackClient:
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            source_url = str(entry.get("webpage_url") or entry.get("url") or "")
             source_id = str(entry.get("id") or "")
+            source_url = _canonical_candidate_url(entry, source_id)
             title = str(entry.get("title") or "").strip()
             if not source_url or not source_id or not title:
                 continue
@@ -216,6 +287,11 @@ class YoutubeTrackClient:
             raise TrackDownloadError("yt-dlp finished without producing a file.")
         return candidates[0]
 
+    @staticmethod
+    def _is_unavailable_format_error(error_text: str) -> bool:
+        lowered = error_text.casefold()
+        return "requested format is not available" in lowered or "no video formats found" in lowered
+
 
 def _clean_optional(value: object) -> str | None:
     if not isinstance(value, str):
@@ -236,6 +312,27 @@ def _extract_thumbnail(entry: dict[str, Any]) -> str | None:
                 if isinstance(url, str) and url.startswith("http"):
                     return url
     return None
+
+
+def _canonical_candidate_url(entry: dict[str, Any], source_id: str) -> str:
+    webpage_url = entry.get("webpage_url")
+    if isinstance(webpage_url, str) and webpage_url.startswith("http"):
+        return webpage_url
+
+    original_url = entry.get("original_url")
+    if isinstance(original_url, str) and original_url.startswith("http"):
+        return original_url
+
+    url = entry.get("url")
+    if isinstance(url, str):
+        if url.startswith("http"):
+            return url
+        if source_id:
+            return f"https://www.youtube.com/watch?v={source_id}"
+
+    if source_id:
+        return f"https://www.youtube.com/watch?v={source_id}"
+    return ""
 
 
 def _to_int(value: object) -> int | None:

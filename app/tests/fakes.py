@@ -326,25 +326,33 @@ class FakeTrackClient:
         self.search_calls: dict[str, int] = defaultdict(int)
         self.download_calls: dict[str, int] = defaultdict(int)
         self.thumbnail_fail_urls: set[str] = set()
+        self.fail_source_urls: dict[str, TrackDownloadError] = {}
 
-    async def search(self, query: str, *, normalized_key: str) -> TrackSearchCandidate:
+    async def search_candidates(self, query: str, *, normalized_key: str) -> list[TrackSearchCandidate]:
         normalized_query = " ".join(query.casefold().split())
         self.search_calls[normalized_query] += 1
         candidates = self.search_map.get(normalized_query)
         if candidates:
-            return candidates[0]
-        return TrackSearchCandidate(
-            source_id=normalized_query.replace(" ", "-"),
-            source_url=f"https://youtube.local/{normalized_query}",
-            title=query.title(),
-            uploader="Uploader",
-            thumbnail_url="https://img.local/thumb.jpg",
-            duration_sec=180,
-            score=100,
-        )
+            return list(candidates)
+        return [
+            TrackSearchCandidate(
+                source_id=normalized_query.replace(" ", "-"),
+                source_url=f"https://youtube.local/{normalized_query}",
+                title=query.title(),
+                uploader="Uploader",
+                thumbnail_url="https://img.local/thumb.jpg",
+                duration_sec=180,
+                score=100,
+            )
+        ]
+
+    async def search(self, query: str, *, normalized_key: str) -> TrackSearchCandidate:
+        return (await self.search_candidates(query, normalized_key=normalized_key))[0]
 
     async def download_audio(self, source_url: str, work_dir: Path, *, normalized_key: str) -> Path:
         self.download_calls[source_url] += 1
+        if source_url in self.fail_source_urls:
+            raise self.fail_source_urls[source_url]
         path = work_dir / "track-source.webm"
         path.write_bytes(b"track-audio")
         return path
