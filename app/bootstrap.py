@@ -37,7 +37,8 @@ from app.infrastructure.persistence.sqlite import (
 )
 from app.infrastructure.providers import (
     HttpMusicMetadataProvider,
-    RemoteMusicDownloadProvider,
+    InternetArchiveMusicProvider,
+    JamendoMusicProvider,
     StaticCookieFileProvider,
     TikTokProvider,
     YouTubeMusicProvider,
@@ -78,7 +79,7 @@ def build_container(settings: Settings) -> AppContainer:
             "cookies_exists": bool(cookies_file and os.path.exists(cookies_file)),
             "ffmpeg": settings.ffmpeg_path,
             "ytdlp": settings.ytdlp_path,
-            "music_remote_provider_configured": bool(settings.music_remote_provider_url),
+            "jamendo_client_configured": bool(settings.jamendo_client_id),
             "music_resolver_order": settings.music_resolver_order_list,
             "music_download_provider_order": settings.music_download_provider_order_list,
         },
@@ -91,7 +92,7 @@ def build_container(settings: Settings) -> AppContainer:
         cookies_exists=bool(cookies_file and os.path.exists(cookies_file)),
         ffmpeg=settings.ffmpeg_path,
         ytdlp=settings.ytdlp_path,
-        music_remote_provider_configured=bool(settings.music_remote_provider_url),
+        jamendo_client_configured=bool(settings.jamendo_client_id),
         music_resolver_order=settings.music_resolver_order_list,
         music_download_provider_order=settings.music_download_provider_order_list,
     )
@@ -123,13 +124,16 @@ def build_container(settings: Settings) -> AppContainer:
         timeout_seconds=settings.music_search_timeout_seconds,
         semaphore=download_semaphore,
     )
-    music_metadata_provider = HttpMusicMetadataProvider(timeout_seconds=settings.request_timeout_seconds)
-    remote_music_download_provider = RemoteMusicDownloadProvider(
-        endpoint_url=settings.music_remote_provider_url,
-        access_token=settings.music_remote_provider_token,
-        timeout_seconds=settings.music_remote_provider_timeout_seconds,
+    jamendo_music_provider = JamendoMusicProvider(
+        client_id=settings.jamendo_client_id,
+        timeout_seconds=settings.jamendo_timeout_seconds,
         semaphore=download_semaphore,
     )
+    internet_archive_music_provider = InternetArchiveMusicProvider(
+        timeout_seconds=settings.internet_archive_timeout_seconds,
+        semaphore=download_semaphore,
+    )
+    music_metadata_provider = HttpMusicMetadataProvider(timeout_seconds=settings.request_timeout_seconds)
     audio_download_client = AudioDownloadClient(
         timeout_seconds=settings.download_timeout_seconds,
         semaphore=download_semaphore,
@@ -150,6 +154,19 @@ def build_container(settings: Settings) -> AppContainer:
         healthcheck_enabled=settings.cookie_healthcheck_enabled,
     )
     resolver_strategy_registry: dict[str, MusicProviderResolverStrategy] = {
+        "jamendo": MusicProviderResolverStrategy(
+            name="jamendo",
+            provider=jamendo_music_provider,
+            cookie_provider=None,
+            respect_health_state=False,
+            skip_probe=jamendo_music_provider.skip_reason,
+        ),
+        "internet_archive": MusicProviderResolverStrategy(
+            name="internet_archive",
+            provider=internet_archive_music_provider,
+            cookie_provider=None,
+            respect_health_state=False,
+        ),
         "youtube_no_cookies": MusicProviderResolverStrategy(
             name="youtube_no_cookies",
             provider=youtube_music_provider,
@@ -158,18 +175,27 @@ def build_container(settings: Settings) -> AppContainer:
         ),
     }
     download_strategy_registry: dict[str, MusicProviderDownloadStrategy] = {
-        "remote_http": MusicProviderDownloadStrategy(
-            name="remote_http",
-            provider=remote_music_download_provider,
+        "jamendo": MusicProviderDownloadStrategy(
+            name="jamendo",
+            provider=jamendo_music_provider,
             cookie_provider=None,
             respect_health_state=False,
-            skip_probe=remote_music_download_provider.skip_reason,
+            skip_probe=jamendo_music_provider.skip_reason,
+            supported_sources=("jamendo",),
+        ),
+        "internet_archive": MusicProviderDownloadStrategy(
+            name="internet_archive",
+            provider=internet_archive_music_provider,
+            cookie_provider=None,
+            respect_health_state=False,
+            supported_sources=("internet_archive",),
         ),
         "youtube_no_cookies": MusicProviderDownloadStrategy(
             name="youtube_no_cookies",
             provider=audio_download_client,
             cookie_provider=None,
             respect_health_state=False,
+            supported_sources=("youtube",),
         ),
     }
     if cookies_file is not None:
@@ -188,6 +214,7 @@ def build_container(settings: Settings) -> AppContainer:
             provider=audio_download_client,
             cookie_provider=cookie_provider,
             respect_health_state=settings.cookie_healthcheck_enabled,
+            supported_sources=("youtube",),
         )
     ordered_resolver_strategies = tuple(
         resolver_strategy_registry[name]
@@ -195,7 +222,10 @@ def build_container(settings: Settings) -> AppContainer:
         if name in resolver_strategy_registry
     )
     if not ordered_resolver_strategies:
-        ordered_resolver_strategies = (resolver_strategy_registry["youtube_no_cookies"],)
+        ordered_resolver_strategies = (
+            resolver_strategy_registry["jamendo"],
+            resolver_strategy_registry["internet_archive"],
+        )
     ordered_download_strategies = tuple(
         download_strategy_registry[name]
         for name in settings.music_download_provider_order_list
@@ -203,8 +233,8 @@ def build_container(settings: Settings) -> AppContainer:
     )
     if not ordered_download_strategies:
         ordered_download_strategies = (
-            download_strategy_registry["remote_http"],
-            download_strategy_registry["youtube_no_cookies"],
+            download_strategy_registry["jamendo"],
+            download_strategy_registry["internet_archive"],
         )
     music_acquisition_service = MusicAcquisitionService(
         resolver_strategies=ordered_resolver_strategies,

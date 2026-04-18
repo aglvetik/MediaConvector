@@ -145,7 +145,7 @@ async def test_audio_extraction_failure_recovers_on_next_cached_request(service_
 
 async def test_music_private_chat_success_flow(service_harness) -> None:
     handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=300, message_id=16, chat_type="private", text="найти after dark")
+        IncomingMessage(chat_id=1, user_id=300, message_id=16, chat_type="private", text="\u043d\u0430\u0439\u0442\u0438 after dark")
     )
     assert handled is True
     assert len(service_harness.gateway.sent_audio_receipts) == 1
@@ -156,28 +156,28 @@ async def test_music_private_chat_success_flow(service_harness) -> None:
 
 async def test_music_group_chat_success_flow(service_harness) -> None:
     handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=-100, user_id=301, message_id=17, chat_type="group", text="трек rammstein sonne")
+        IncomingMessage(chat_id=-100, user_id=301, message_id=17, chat_type="group", text="\u0442\u0440\u0435\u043a rammstein sonne")
     )
     assert handled is True
     assert len(service_harness.gateway.sent_audio_receipts) == 1
 
 
 async def test_music_cache_hit_flow(service_harness) -> None:
-    query = "песня in the end slowed"
+    query = "\u043f\u0435\u0441\u043d\u044f in the end slowed"
     await service_harness.process_message_service.handle_message(
         IncomingMessage(chat_id=1, user_id=302, message_id=18, chat_type="private", text=query)
     )
     await service_harness.process_message_service.handle_message(
         IncomingMessage(chat_id=1, user_id=402, message_id=19, chat_type="private", text=query)
     )
-    assert service_harness.music_provider.search_calls["in the end slowed"] == 1
-    assert service_harness.remote_downloader.download_calls["in_the_end_slowed"] == 1
+    assert service_harness.jamendo_provider.search_calls["in the end slowed"] == 1
+    assert service_harness.jamendo_provider.download_calls["in_the_end_slowed"] == 1
     assert len(service_harness.gateway.sent_audio_receipts) == 2
 
 
 async def test_music_too_fast_same_user_request_flow(service_harness) -> None:
-    first = IncomingMessage(chat_id=1, user_id=303, message_id=20, chat_type="private", text="найти lana del rey")
-    second = IncomingMessage(chat_id=1, user_id=303, message_id=21, chat_type="private", text="найти lana del rey")
+    first = IncomingMessage(chat_id=1, user_id=303, message_id=20, chat_type="private", text="\u043d\u0430\u0439\u0442\u0438 lana del rey")
+    second = IncomingMessage(chat_id=1, user_id=303, message_id=21, chat_type="private", text="\u043d\u0430\u0439\u0442\u0438 lana del rey")
     await service_harness.process_message_service.handle_message(first)
     handled = await service_harness.process_message_service.handle_message(second)
     assert handled is True
@@ -187,31 +187,32 @@ async def test_music_too_fast_same_user_request_flow(service_harness) -> None:
 
 async def test_music_empty_query_flow(service_harness) -> None:
     handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=304, message_id=22, chat_type="private", text="найти   ")
+        IncomingMessage(chat_id=1, user_id=304, message_id=22, chat_type="private", text="\u043d\u0430\u0439\u0442\u0438   ")
     )
     assert handled is True
-    assert service_harness.gateway.text_messages[-1].text == messages.music_empty_query("найти")
+    assert service_harness.gateway.text_messages[-1].text == messages.music_empty_query("\u043d\u0430\u0439\u0442\u0438")
 
 
 async def test_music_garbage_query_flow(service_harness) -> None:
     handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=304, message_id=221, chat_type="private", text="песня .")
+        IncomingMessage(chat_id=1, user_id=304, message_id=221, chat_type="private", text="\u043f\u0435\u0441\u043d\u044f .")
     )
     assert handled is True
     assert service_harness.gateway.text_messages[-1].text == messages.MUSIC_QUERY_TOO_SHORT
 
 
 async def test_music_no_result_found_flow(service_harness) -> None:
-    service_harness.music_provider.results["ghost query"] = None
+    service_harness.jamendo_provider.results["ghost query"] = None
+    service_harness.internet_archive_provider.results["ghost query"] = None
     handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=305, message_id=23, chat_type="private", text="песня ghost query")
+        IncomingMessage(chat_id=1, user_id=305, message_id=23, chat_type="private", text="\u043f\u0435\u0441\u043d\u044f ghost query")
     )
     assert handled is True
     assert service_harness.gateway.text_messages[-1].text == messages.MUSIC_NOT_FOUND
 
 
 async def test_music_invalid_cached_audio_file_id_flow(service_harness) -> None:
-    query = "найти summertime sadness"
+    query = "\u043d\u0430\u0439\u0442\u0438 summertime sadness"
     await service_harness.process_message_service.handle_message(
         IncomingMessage(chat_id=1, user_id=306, message_id=24, chat_type="private", text=query)
     )
@@ -225,13 +226,13 @@ async def test_music_invalid_cached_audio_file_id_flow(service_harness) -> None:
     refreshed = await service_harness.cache_service.get_entry("music:ytm:summertime sadness")
     assert refreshed is not None
     assert refreshed.audio_file_id != old_audio_file_id
-    assert service_harness.remote_downloader.download_calls["summertime_sadness"] == 2
+    assert service_harness.jamendo_provider.download_calls["summertime_sadness"] == 2
 
 
 async def test_music_thumbnail_failure_is_optional(service_harness) -> None:
-    service_harness.audio_downloader.fail_thumbnail_ids.add("after_dark")
+    service_harness.jamendo_provider.fail_thumbnail_ids.add("after_dark")
     handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=307, message_id=26, chat_type="private", text="найти after dark")
+        IncomingMessage(chat_id=1, user_id=307, message_id=26, chat_type="private", text="\u043d\u0430\u0439\u0442\u0438 after dark")
     )
     assert handled is True
     assert len(service_harness.gateway.sent_audio_receipts) == 1

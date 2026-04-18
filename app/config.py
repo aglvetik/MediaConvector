@@ -37,12 +37,15 @@ class Settings(BaseSettings):
     max_music_query_length: int = Field(default=120, alias="MAX_MUSIC_QUERY_LENGTH")
     music_search_timeout_seconds: int = Field(default=15, alias="MUSIC_SEARCH_TIMEOUT_SECONDS")
     music_resolver_max_candidates: int = Field(default=3, alias="MUSIC_RESOLVER_MAX_CANDIDATES")
-    music_strategy_order: str = Field(default="youtube_cookies,youtube_no_cookies", alias="MUSIC_STRATEGY_ORDER")
+    music_strategy_order: str = Field(default="jamendo,internet_archive", alias="MUSIC_STRATEGY_ORDER")
     music_resolver_order: str | None = Field(default=None, alias="MUSIC_RESOLVER_ORDER")
     music_download_provider_order: str = Field(
-        default="remote_http,youtube_cookies,youtube_no_cookies",
+        default="jamendo,internet_archive",
         alias="MUSIC_DOWNLOAD_PROVIDER_ORDER",
     )
+    jamendo_client_id: str | None = Field(default=None, alias="JAMENDO_CLIENT_ID")
+    jamendo_timeout_seconds: int = Field(default=15, alias="JAMENDO_TIMEOUT_SECONDS")
+    internet_archive_timeout_seconds: int = Field(default=20, alias="INTERNET_ARCHIVE_TIMEOUT_SECONDS")
     music_remote_provider_url: str | None = Field(default=None, alias="MUSIC_REMOTE_PROVIDER_URL")
     music_remote_provider_token: str | None = Field(default=None, alias="MUSIC_REMOTE_PROVIDER_TOKEN")
     music_remote_provider_timeout_seconds: int = Field(default=30, alias="MUSIC_REMOTE_PROVIDER_TIMEOUT_SECONDS")
@@ -63,6 +66,8 @@ class Settings(BaseSettings):
         "max_music_query_length",
         "music_search_timeout_seconds",
         "music_resolver_max_candidates",
+        "jamendo_timeout_seconds",
+        "internet_archive_timeout_seconds",
         "music_remote_provider_timeout_seconds",
         "youtube_auth_fail_threshold",
     )
@@ -96,6 +101,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "music_resolver_order",
+        "jamendo_client_id",
         "music_remote_provider_url",
         "music_remote_provider_token",
         mode="before",
@@ -136,18 +142,18 @@ class Settings(BaseSettings):
 
     @property
     def music_strategy_order_list(self) -> tuple[str, ...]:
-        return self._parse_csv_order(self.music_strategy_order, default=("youtube_cookies", "youtube_no_cookies"))
+        return self._parse_csv_order(self.music_strategy_order, default=("jamendo", "internet_archive"))
 
     @property
     def music_resolver_order_list(self) -> tuple[str, ...]:
         source = self.music_resolver_order or self.music_strategy_order
-        return self._parse_csv_order(source, default=("youtube_cookies", "youtube_no_cookies"))
+        return self._parse_csv_order(source, default=("jamendo", "internet_archive"))
 
     @property
     def music_download_provider_order_list(self) -> tuple[str, ...]:
         return self._parse_csv_order(
             self.music_download_provider_order,
-            default=("remote_http", "youtube_cookies", "youtube_no_cookies"),
+            default=("jamendo", "internet_archive"),
         )
 
     @property

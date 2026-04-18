@@ -22,7 +22,6 @@ from app.application.services import (
     RateLimitService,
     UserRequestGuardService,
 )
-from app.infrastructure.providers.music.static_cookie_file_provider import StaticCookieFileProvider
 from app.infrastructure.persistence.sqlite import (
     Database,
     SqlAlchemyCacheRepository,
@@ -34,12 +33,10 @@ from app.infrastructure.persistence.sqlite import (
 from app.infrastructure.persistence.sqlite.base import Base
 from app.infrastructure.temp import TempFileManager
 from app.tests.fakes import (
-    FakeAudioDownloadClient,
     FakeFfmpegAdapter,
     FakeGateway,
-    FakeMusicProvider,
+    FakeLegalMusicProvider,
     FakeProvider,
-    FakeRemoteMusicDownloadProvider,
 )
 
 
@@ -62,16 +59,14 @@ class ServiceHarness:
     process_message_service: ProcessMessageService
     gateway: FakeGateway
     provider: FakeProvider
-    music_provider: FakeMusicProvider
-    remote_downloader: FakeRemoteMusicDownloadProvider
-    audio_downloader: FakeAudioDownloadClient
+    jamendo_provider: FakeLegalMusicProvider
+    internet_archive_provider: FakeLegalMusicProvider
     ffmpeg: FakeFfmpegAdapter
     temp_manager: TempFileManager
     cache_repository: SqlAlchemyCacheRepository
     request_log_repository: SqlAlchemyRequestLogRepository
     job_repository: SqlAlchemyDownloadJobRepository
     music_source_state_repository: SqlAlchemyMusicSourceStateRepository
-    cookies_file: Path
 
 
 @pytest_asyncio.fixture
@@ -83,16 +78,13 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
     processed_message_repository = SqlAlchemyProcessedMessageRepository(database)
     gateway = FakeGateway()
     provider = FakeProvider()
-    music_provider = FakeMusicProvider()
-    remote_downloader = FakeRemoteMusicDownloadProvider()
-    audio_downloader = FakeAudioDownloadClient(audio_only=True)
+    jamendo_provider = FakeLegalMusicProvider("jamendo")
+    internet_archive_provider = FakeLegalMusicProvider("internet_archive")
     ffmpeg = FakeFfmpegAdapter()
     metrics = MetricsService()
     cache_service = CacheService(cache_repository)
     delivery_service = DeliveryService(gateway)
     temp_manager = TempFileManager(tmp_path / "tmp", ttl_minutes=30)
-    cookies_file = tmp_path / "cookies.txt"
-    cookies_file.write_text("# Netscape HTTP Cookie File", encoding="utf-8")
     dedup_service = InFlightDedupService()
     media_pipeline_service = MediaPipelineService(
         cache_service=cache_service,
@@ -104,53 +96,40 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
         metrics_service=metrics,
     )
     music_search_service = MusicSearchService(max_query_length=120)
-    music_source_health_service = MusicSourceHealthService(
-        music_source_state_repository,
-        auth_fail_threshold=2,
-        degrade_ttl_minutes=30,
-        healthcheck_enabled=True,
-    )
-    cookie_provider = StaticCookieFileProvider(
-        cookies_file=cookies_file,
-        health_service=music_source_health_service,
-    )
     music_acquisition_service = MusicAcquisitionService(
         resolver_strategies=(
             MusicProviderResolverStrategy(
-                name="youtube_cookies",
-                provider=music_provider,
-                cookie_provider=cookie_provider,
-                respect_health_state=True,
+                name="jamendo",
+                provider=jamendo_provider,
+                cookie_provider=None,
+                respect_health_state=False,
+                skip_probe=jamendo_provider.skip_reason,
             ),
             MusicProviderResolverStrategy(
-                name="youtube_no_cookies",
-                provider=music_provider,
+                name="internet_archive",
+                provider=internet_archive_provider,
                 cookie_provider=None,
                 respect_health_state=False,
             ),
         ),
         download_strategies=(
             MusicProviderDownloadStrategy(
-                name="remote_http",
-                provider=remote_downloader,
+                name="jamendo",
+                provider=jamendo_provider,
                 cookie_provider=None,
                 respect_health_state=False,
-                skip_probe=remote_downloader.skip_reason,
+                skip_probe=jamendo_provider.skip_reason,
+                supported_sources=("jamendo",),
             ),
             MusicProviderDownloadStrategy(
-                name="youtube_cookies",
-                provider=audio_downloader,
-                cookie_provider=cookie_provider,
-                respect_health_state=True,
-            ),
-            MusicProviderDownloadStrategy(
-                name="youtube_no_cookies",
-                provider=audio_downloader,
+                name="internet_archive",
+                provider=internet_archive_provider,
                 cookie_provider=None,
                 respect_health_state=False,
+                supported_sources=("internet_archive",),
             ),
         ),
-        metadata_provider=audio_downloader,
+        metadata_provider=jamendo_provider,
         max_candidates=3,
     )
     music_pipeline_service = MusicPipelineService(
@@ -182,14 +161,12 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
         process_message_service=process_message_service,
         gateway=gateway,
         provider=provider,
-        music_provider=music_provider,
-        remote_downloader=remote_downloader,
-        audio_downloader=audio_downloader,
+        jamendo_provider=jamendo_provider,
+        internet_archive_provider=internet_archive_provider,
         ffmpeg=ffmpeg,
         temp_manager=temp_manager,
         cache_repository=cache_repository,
         request_log_repository=request_log_repository,
         job_repository=job_repository,
         music_source_state_repository=music_source_state_repository,
-        cookies_file=cookies_file,
     )

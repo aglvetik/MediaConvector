@@ -1,64 +1,86 @@
 # TikTok and Music Telegram Bot
 
-Production-oriented Telegram bot for Python 3.11 that:
+Production-oriented Telegram bot for Python 3.11.
 
-- auto-detects TikTok links in chat messages
-- downloads TikTok video and extracts separate audio
-- searches music by text triggers: `найти`, `трек`, `песня`
-- sends music as Telegram audio with metadata when available
-- caches Telegram `file_id` values in SQLite
-
-The project keeps a layered architecture and is designed for a small Ubuntu VPS.
-
-## What The Bot Does
-
-User-facing flows:
+It keeps two user-facing flows:
 
 - TikTok:
-  send a message with a TikTok URL and the bot will reply with the video and separate audio
+  auto-detect a TikTok link in a message, send video plus separate audio
 - Music:
-  start a message with `найти`, `трек`, or `песня`, for example:
-  - `найти after dark`
-  - `трек rammstein sonne`
-  - `песня in the end slowed`
+  start a message with `найти`, `трек`, or `песня`, then send one matching track as Telegram audio
 
-The bot keeps the same simple UX:
+The bot keeps SQLite cache, temp-file-only processing, structured logging, polling mode, and a layered architecture.
 
-- TikTok loading message: `Загрузка 🔎`
-- Music loading message: `Ищу трек 🔎`
-- one-result delivery flow
-- best-effort loading-message cleanup
+## What Changed In The Music Backend
 
-## Architecture Overview
+The music feature no longer depends on YouTube / YouTube Music direct media extraction as the default production path.
+
+Current default provider order:
+
+- `jamendo`
+- `internet_archive`
+
+This means:
+
+- search and download now use legal, API-backed, publicly downloadable music sources
+- YouTube direct extraction is no longer part of the active production order
+- the tradeoff is smaller catalog coverage, but much better stability for a VPS bot
+
+## User Experience
+
+TikTok flow:
+
+- send a TikTok link
+- bot replies with `Загрузка 🔎`
+- bot sends video and separate audio
+
+Music flow:
+
+- send a message starting with:
+  - `найти`
+  - `трек`
+  - `песня`
+- bot replies with `Ищу трек 🔎`
+- bot sends one audio track with title / performer / thumbnail when available
+
+Examples:
+
+- `найти after dark`
+- `трек rammstein sonne`
+- `песня in the end slowed`
+
+TikTok behavior and Telegram UX remain unchanged by the music refactor.
+
+## Architecture
 
 The repository keeps a layered structure:
 
-- `app/presentation`: aiogram handlers and transport wiring
-- `app/application`: orchestration services for TikTok and music flows
-- `app/domain`: entities, enums, policies, interfaces, typed errors
-- `app/infrastructure`: Telegram gateway, SQLite repositories, ffmpeg, yt-dlp integrations, music providers, temp storage, logging
+- `app/presentation`: aiogram handlers and transport
+- `app/application`: orchestration services and pipelines
+- `app/domain`: entities, enums, policies, interfaces, errors
+- `app/infrastructure`: Telegram gateway, SQLite repositories, ffmpeg, TikTok provider, music providers, temp management, logging
 - `app/workers`: cleanup and health workers
 
-## Music Backend Design
+### Music Provider Architecture
 
-The music flow is intentionally decoupled into separate concerns:
+The music subsystem is split into:
 
-- search provider:
-  used to resolve candidate tracks and metadata
-- metadata provider:
-  used for optional cover-art retrieval
-- download providers:
-  used to acquire downloadable audio
+- resolver/search providers
+- download providers
+- metadata/thumbnail provider
 
-Current production-oriented design:
+Current production configuration:
 
-- YouTube / YouTube Music is used for search and metadata discovery
-- primary downloadable path is a configurable remote HTTP download provider
-- YouTube direct extraction remains only as an optional fallback path
+- Jamendo:
+  official API search plus legal download URLs
+- Internet Archive:
+  official search and metadata endpoints plus downloadable public audio files
+- HTTP metadata provider:
+  thumbnail download helper
 
-This reduces operational dependence on fragile direct YouTube media extraction.
+This keeps search and download decoupled and avoids using a fragile YouTube extraction path as the main backend.
 
-## Directory Structure
+## Repository Layout
 
 ```text
 app/
@@ -78,18 +100,16 @@ scripts/
 ## Requirements
 
 - Python 3.11
-- ffmpeg installed on the VPS
-- Telegram bot token from BotFather
-- SQLite for MVP persistence
+- ffmpeg installed on the host
+- Telegram bot token
+- SQLite
 
-Optional for music fallback:
+Optional legacy fallback tooling still present in the repo:
 
 - `yt-dlp`
-- valid cookies file for YouTube-backed search/fallback if you want cookie-backed resolver/download attempts
+- `YTDLP_COOKIES_FILE`
 
-Recommended for stable music delivery:
-
-- an operator-managed HTTP download backend exposed through `MUSIC_REMOTE_PROVIDER_URL`
+Those are no longer required for the default production music path.
 
 ## Configuration
 
@@ -99,57 +119,41 @@ Minimal `.env`:
 
 ```env
 BOT_TOKEN=1234567890:telegram-bot-token
+JAMENDO_CLIENT_ID=your-jamendo-client-id
 ```
 
 Important settings:
 
-- `BOT_TOKEN`: required Telegram bot token
-- `BOT_MODE`: current implementation uses `polling`
+- `BOT_TOKEN`: Telegram bot token
+- `BOT_MODE`: transport mode, currently `polling`
 - `DATABASE_URL`: default `sqlite+aiosqlite:///runtime/bot.db`
 - `TEMP_DIR`: temp processing directory
 - `FFMPEG_PATH`: ffmpeg binary path
-- `YTDLP_PATH`: yt-dlp executable name/path for diagnostics and fallback downloader
-- `YTDLP_COOKIES_FILE`: optional Netscape cookies file path for YouTube-backed music resolver/fallback
-- `MAX_PARALLEL_DOWNLOADS`: global download concurrency limit
-- `MAX_PARALLEL_FFMPEG`: ffmpeg concurrency limit
+- `MAX_PARALLEL_DOWNLOADS`: network/download concurrency
+- `MAX_PARALLEL_FFMPEG`: ffmpeg concurrency
 - `USER_REQUESTS_PER_MINUTE`: per-user rate limit
-- `USER_REQUEST_COOLDOWN_SECONDS`: soft cooldown between requests from the same user
-- `MAX_MUSIC_QUERY_LENGTH`: music query guard
-- `MUSIC_SEARCH_TIMEOUT_SECONDS`: search provider timeout
-- `MUSIC_RESOLVER_MAX_CANDIDATES`: number of candidates evaluated per music request
-- `MUSIC_RESOLVER_ORDER`: resolver strategy order, default `youtube_cookies,youtube_no_cookies`
-- `MUSIC_DOWNLOAD_PROVIDER_ORDER`: download strategy order, default `remote_http,youtube_cookies,youtube_no_cookies`
-- `MUSIC_REMOTE_PROVIDER_URL`: recommended primary music download backend endpoint
-- `MUSIC_REMOTE_PROVIDER_TOKEN`: optional bearer token for the remote music backend
-- `MUSIC_REMOTE_PROVIDER_TIMEOUT_SECONDS`: timeout for the remote music backend
-- `MUSIC_STRATEGY_ORDER`: legacy compatibility setting still accepted for resolver ordering
-- `YOUTUBE_AUTH_FAIL_THRESHOLD`: repeated auth failures before degrading cookie-backed YouTube path
-- `YOUTUBE_DEGRADE_TTL_MINUTES`: TTL for degraded cookie-backed YouTube state
-- `COOKIE_HEALTHCHECK_ENABLED`: skip degraded cookie-backed strategies until recovery window expires
+- `USER_REQUEST_COOLDOWN_SECONDS`: soft cooldown between requests from one user
+- `MAX_MUSIC_QUERY_LENGTH`: music query length guard
+- `MUSIC_RESOLVER_MAX_CANDIDATES`: candidates checked per music request
+- `MUSIC_RESOLVER_ORDER`: default `jamendo,internet_archive`
+- `MUSIC_DOWNLOAD_PROVIDER_ORDER`: default `jamendo,internet_archive`
+- `JAMENDO_CLIENT_ID`: required for Jamendo API access
+- `JAMENDO_TIMEOUT_SECONDS`: Jamendo request timeout
+- `INTERNET_ARCHIVE_TIMEOUT_SECONDS`: Internet Archive request timeout
 
-## Remote Music Download Provider Contract
+Legacy / optional settings still accepted:
 
-The recommended primary music backend is a simple HTTP provider.
+- `YTDLP_PATH`
+- `YTDLP_COOKIES_FILE`
+- `MUSIC_STRATEGY_ORDER`
+- `YOUTUBE_AUTH_FAIL_THRESHOLD`
+- `YOUTUBE_DEGRADE_TTL_MINUTES`
+- `MUSIC_AUDIO_ONLY`
+- `COOKIE_HEALTHCHECK_ENABLED`
 
-Request:
+They are kept mainly for backward-compatible optional fallback wiring, not for the default production music order.
 
-- `POST` to `MUSIC_REMOTE_PROVIDER_URL`
-- JSON body contains:
-  - `query`
-  - `normalized_query`
-  - `candidate` with source id, title, performer, canonical/source URLs, thumbnail, ranking
-
-Supported response modes:
-
-- JSON:
-  - `download_url` or `audio_url`
-  - optional `title`, `performer`, `thumbnail_url`, `canonical_url`, `source_id`, `source_name`, `file_name`
-- direct audio response:
-  - `audio/*` or `application/octet-stream`
-
-This keeps the bot pluggable: the search backend and the actual download backend do not need to be the same system.
-
-## Local Development
+## Local Run
 
 ```bash
 python3.11 -m venv .venv
@@ -183,37 +187,36 @@ Run the full suite:
 pytest -q
 ```
 
-Run only e2e-style tests:
+Run only music-related tests:
 
 ```bash
-pytest app/tests/e2e -q
+pytest app/tests/unit app/tests/integration app/tests/e2e -q
 ```
 
-Coverage includes:
+The suite covers:
 
-- TikTok URL extraction and normalization
-- music trigger parsing and hardened query validation
-- multi-candidate music resolution
-- stable-provider-first acquisition and fallback behavior
-- degraded YouTube auth state tracking and recovery
-- cache reuse and invalid cached file rebuild
-- SQLite repository round-trips
-- Telegram delivery behavior
+- TikTok extraction and normalization
+- music trigger parsing and validation
+- Jamendo parsing and legal-download filtering
+- Internet Archive search parsing and downloadable file selection
+- provider ordering and fallback behavior
+- music cache reuse and invalid cache rebuild
+- Telegram audio delivery behavior
 - temp-file lifecycle
-- private/group happy paths and failure paths
+- private/group success flows
 
-## Deployment on Ubuntu
+## Deployment On Ubuntu
 
-1. Clone the repository to your VPS.
+1. Clone the repository on the VPS.
 2. Create `.env` from `.env.example`.
-3. Install system dependencies:
+3. Install requirements:
 
 ```bash
 sudo apt update
 sudo apt install -y python3.11 python3.11-venv ffmpeg
 ```
 
-4. Create virtualenv and install the app:
+4. Create virtualenv and install:
 
 ```bash
 python3.11 -m venv .venv
@@ -234,7 +237,7 @@ alembic upgrade head
 python -m app.main
 ```
 
-Systemd example:
+Systemd:
 
 ```bash
 sudo cp deployment/systemd/tiktok-downloader-bot.service /etc/systemd/system/
@@ -252,17 +255,18 @@ journalctl -u tiktok-downloader-bot -f
 
 ## Operational Notes
 
-- TikTok flow is unchanged by the music refactor.
+- TikTok flow is unchanged.
 - Music cache keys still use normalized queries like `music:ytm:<normalized_query>`.
-- Music cache now also stores which acquisition backend produced the cached Telegram audio.
-- The bot still uses temp files only during active processing.
-- Cookie-backed YouTube strategies are health-tracked in SQLite and automatically degraded after repeated auth-like failures.
-- Remote HTTP download is the recommended primary music backend for a low-maintenance VPS setup.
-- If the remote backend is not configured or unavailable, the bot can still try configured fallback download strategies.
+- Music cache now stores which acquisition backend produced the cached Telegram audio.
+- Jamendo is the preferred first source when `JAMENDO_CLIENT_ID` is configured.
+- If Jamendo is unavailable or yields no usable result, the bot falls back to Internet Archive.
+- The music backend now prefers stable legal downloads over maximum catalog size.
+- Temporary files are cleaned after processing and by the cleanup worker.
 
 ## Limitations
 
-- The bot still returns only one music result to the user.
-- YouTube-backed fallback remains subject to upstream anti-bot behavior, cookies freshness, and extractor changes.
-- A remote music backend is recommended for production stability; this repository does not bundle a universal third-party media service.
-- SQLite is appropriate for a small VPS, but not for large multi-process deployments.
+- Catalog breadth is smaller than a YouTube-based scraper approach.
+- Jamendo requires an API client id.
+- Internet Archive search quality depends on public metadata quality.
+- The bot still returns one track only, with no result-selection UI.
+- SQLite is suitable for a small VPS, but not for larger multi-process deployments.

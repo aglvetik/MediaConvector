@@ -124,6 +124,103 @@ class FakeMusicProvider:
         ]
 
 
+class FakeLegalMusicProvider:
+    def __init__(self, provider_name: str, *, performer: str = "Test Artist") -> None:
+        self.provider_name = provider_name
+        self.performer = performer
+        self.search_calls: dict[str, int] = defaultdict(int)
+        self.download_calls: dict[str, int] = defaultdict(int)
+        self.download_attempts: list[str] = []
+        self.thumbnail_calls: dict[str, int] = defaultdict(int)
+        self.results: dict[str, list[MusicTrack] | None] = {}
+        self.fail_queries: set[str] = set()
+        self.fail_download_ids: set[str] = set()
+        self.fail_thumbnail_ids: set[str] = set()
+        self.configured = True
+
+    async def skip_reason(self) -> str | None:
+        if self.configured:
+            return None
+        return "provider_not_configured"
+
+    async def resolve_candidates(
+        self,
+        query: str,
+        *,
+        max_candidates: int,
+        cookies_file: Path | None = None,
+    ) -> list[MusicTrack]:
+        del cookies_file
+        self.search_calls[query] += 1
+        if query in self.fail_queries:
+            raise MusicDownloadError(
+                "search failed",
+                error_code=MusicFailureCode.SOURCE_UNAVAILABLE.value,
+            )
+        if query in self.results:
+            predefined = self.results[query]
+            if predefined is None:
+                return []
+            return predefined[:max_candidates]
+        source_id = query.casefold().replace(" ", "_")
+        title = " ".join(word.capitalize() for word in query.split())
+        return [
+            MusicTrack(
+                source_id=source_id,
+                source_url=f"https://files.example/{self.provider_name}/{source_id}.mp3",
+                canonical_url=f"https://catalog.example/{self.provider_name}/{source_id}",
+                title=title,
+                performer=self.performer,
+                duration_sec=180,
+                thumbnail_url=f"https://img.example/{source_id}.jpg",
+                resolver_name=f"{self.provider_name}_resolver",
+                source_name=self.provider_name,
+                ranking=1,
+            )
+        ]
+
+    async def download_track_audio(
+        self,
+        query: MusicSearchQuery,
+        candidate: MusicTrack,
+        work_dir: Path,
+        *,
+        cookies_file: Path | None = None,
+    ) -> MusicDownloadArtifact:
+        del query
+        del cookies_file
+        if candidate.source_name != self.provider_name:
+            raise MusicDownloadError(
+                "unsupported candidate source",
+                error_code=MusicFailureCode.SOURCE_UNAVAILABLE.value,
+            )
+        self.download_calls[candidate.source_id] += 1
+        self.download_attempts.append(candidate.source_id)
+        if candidate.source_id in self.fail_download_ids:
+            raise MusicDownloadError(
+                "download failed",
+                error_code=MusicFailureCode.SOURCE_UNAVAILABLE.value,
+            )
+        path = work_dir / f"{self.provider_name}-{candidate.source_id}.mp3"
+        path.write_bytes(b"legal-music-bytes")
+        return MusicDownloadArtifact(
+            source_audio_path=path,
+            provider_name=self.provider_name,
+            canonical_url=candidate.canonical_url,
+            source_id=candidate.source_id,
+            source_name=self.provider_name,
+        )
+
+    async def download_thumbnail(self, thumbnail_url: str, work_dir: Path, *, fallback_stem: str) -> Path | None:
+        del thumbnail_url
+        self.thumbnail_calls[fallback_stem] += 1
+        if fallback_stem in self.fail_thumbnail_ids:
+            return None
+        path = work_dir / f"{fallback_stem}-thumb.jpg"
+        path.write_bytes(b"thumbnail-bytes")
+        return path
+
+
 class FakeAudioDownloadClient:
     def __init__(self, *, audio_only: bool = True) -> None:
         self.audio_only = audio_only

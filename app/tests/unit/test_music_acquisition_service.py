@@ -33,12 +33,18 @@ class FakeResolverStrategy:
 @dataclass(slots=True)
 class FakeDownloadStrategy:
     name: str
+    supported_sources: tuple[str, ...] = ()
     skip_value: str | None = None
     acquire_errors: dict[str, MusicDownloadError] = field(default_factory=dict)
     acquire_calls: list[str] = field(default_factory=list)
 
     async def skip_reason(self) -> str | None:
         return self.skip_value
+
+    def supports_candidate(self, candidate: MusicTrack) -> bool:
+        if not self.supported_sources:
+            return True
+        return candidate.source_name in self.supported_sources
 
     async def acquire(self, query, candidate: MusicTrack, work_dir: Path) -> MusicDownloadArtifact:
         del query
@@ -58,44 +64,36 @@ class FakeDownloadStrategy:
 def _candidate(source_id: str, ranking: int) -> MusicTrack:
     return MusicTrack(
         source_id=source_id,
-        source_url=f"https://www.youtube.com/watch?v={source_id}",
-        canonical_url=f"https://music.youtube.com/watch?v={source_id}",
+        source_url=f"https://catalog.example/jamendo/{source_id}",
+        canonical_url=f"https://catalog.example/jamendo/{source_id}",
         title=f"Track {source_id}",
         performer="Artist",
         duration_sec=180,
         thumbnail_url=None,
         resolver_name="test",
-        source_name="youtube",
+        source_name="jamendo",
         ranking=ranking,
     )
 
 
-async def test_multi_candidate_resolution_tries_next_candidate_after_all_download_strategies_fail(tmp_path: Path) -> None:
+async def test_multi_candidate_resolution_tries_next_candidate_inside_same_provider(tmp_path: Path) -> None:
     resolver = FakeResolverStrategy(
-        name="youtube_cookies",
+        name="jamendo",
         candidates=[_candidate("first", 1), _candidate("second", 2)],
     )
-    remote = FakeDownloadStrategy(
-        name="remote_http",
+    jamendo_downloader = FakeDownloadStrategy(
+        name="jamendo",
+        supported_sources=("jamendo",),
         acquire_errors={
             "first": MusicDownloadError(
-                "remote unavailable",
+                "download unavailable",
                 error_code=MusicFailureCode.SOURCE_UNAVAILABLE.value,
-            ),
-        },
-    )
-    youtube_direct = FakeDownloadStrategy(
-        name="youtube_cookies",
-        acquire_errors={
-            "first": MusicDownloadError(
-                "no formats",
-                error_code=MusicFailureCode.NO_FORMATS.value,
             ),
         },
     )
     service = MusicAcquisitionService(
         resolver_strategies=(resolver,),
-        download_strategies=(remote, youtube_direct),
+        download_strategies=(jamendo_downloader,),
         metadata_provider=None,
         max_candidates=3,
     )
@@ -105,29 +103,48 @@ async def test_multi_candidate_resolution_tries_next_candidate_after_all_downloa
         tmp_path,
     )
 
-    assert result.track.source_id == "remote_http-second"
-    assert remote.acquire_calls == ["first", "second"]
-    assert youtube_direct.acquire_calls == ["first"]
+    assert result.track.source_id == "jamendo-second"
+    assert jamendo_downloader.acquire_calls == ["first", "second"]
 
 
-async def test_strategy_fallback_uses_next_download_strategy_after_remote_failure(tmp_path: Path) -> None:
-    resolver = FakeResolverStrategy(
-        name="youtube_cookies",
+async def test_provider_order_falls_back_to_next_resolver_when_jamendo_downloads_fail(tmp_path: Path) -> None:
+    jamendo_resolver = FakeResolverStrategy(
+        name="jamendo",
         candidates=[_candidate("main", 1)],
     )
-    remote = FakeDownloadStrategy(
-        name="remote_http",
+    internet_archive_candidate = MusicTrack(
+        source_id="archive-main",
+        source_url="https://archive.org/download/archive-main/audio.mp3",
+        canonical_url="https://archive.org/details/archive-main",
+        title="Archive Main",
+        performer="Archive Artist",
+        duration_sec=180,
+        thumbnail_url=None,
+        resolver_name="test",
+        source_name="internet_archive",
+        ranking=1,
+    )
+    archive_resolver = FakeResolverStrategy(
+        name="internet_archive",
+        candidates=[internet_archive_candidate],
+    )
+    jamendo_downloader = FakeDownloadStrategy(
+        name="jamendo",
+        supported_sources=("jamendo",),
         acquire_errors={
             "main": MusicDownloadError(
-                "remote unavailable",
+                "jamendo unavailable",
                 error_code=MusicFailureCode.SOURCE_UNAVAILABLE.value,
             ),
         },
     )
-    youtube_direct = FakeDownloadStrategy(name="youtube_cookies")
+    archive_downloader = FakeDownloadStrategy(
+        name="internet_archive",
+        supported_sources=("internet_archive",),
+    )
     service = MusicAcquisitionService(
-        resolver_strategies=(resolver,),
-        download_strategies=(remote, youtube_direct),
+        resolver_strategies=(jamendo_resolver, archive_resolver),
+        download_strategies=(jamendo_downloader, archive_downloader),
         metadata_provider=None,
         max_candidates=3,
     )
@@ -137,24 +154,47 @@ async def test_strategy_fallback_uses_next_download_strategy_after_remote_failur
         tmp_path,
     )
 
-    assert result.track.source_id == "youtube_cookies-main"
-    assert remote.acquire_calls == ["main"]
-    assert youtube_direct.acquire_calls == ["main"]
+    assert result.track.source_id == "internet_archive-archive-main"
+    assert jamendo_resolver.resolve_calls == 1
+    assert archive_resolver.resolve_calls == 1
+    assert jamendo_downloader.acquire_calls == ["main"]
+    assert archive_downloader.acquire_calls == ["archive-main"]
 
 
-async def test_unconfigured_primary_download_strategy_is_skipped_without_blocking_fallback(tmp_path: Path) -> None:
-    resolver = FakeResolverStrategy(
-        name="youtube_cookies",
+async def test_unconfigured_primary_provider_is_skipped_without_blocking_archive_fallback(tmp_path: Path) -> None:
+    jamendo_resolver = FakeResolverStrategy(
+        name="jamendo",
         candidates=[_candidate("main", 1)],
-    )
-    remote = FakeDownloadStrategy(
-        name="remote_http",
         skip_value="provider_not_configured",
     )
-    youtube_direct = FakeDownloadStrategy(name="youtube_cookies")
+    archive_candidate = MusicTrack(
+        source_id="archive-track",
+        source_url="https://archive.org/download/archive-track/audio.mp3",
+        canonical_url="https://archive.org/details/archive-track",
+        title="Archive Track",
+        performer="Archive Artist",
+        duration_sec=180,
+        thumbnail_url=None,
+        resolver_name="test",
+        source_name="internet_archive",
+        ranking=1,
+    )
+    archive_resolver = FakeResolverStrategy(
+        name="internet_archive",
+        candidates=[archive_candidate],
+    )
+    jamendo_downloader = FakeDownloadStrategy(
+        name="jamendo",
+        supported_sources=("jamendo",),
+        skip_value="provider_not_configured",
+    )
+    archive_downloader = FakeDownloadStrategy(
+        name="internet_archive",
+        supported_sources=("internet_archive",),
+    )
     service = MusicAcquisitionService(
-        resolver_strategies=(resolver,),
-        download_strategies=(remote, youtube_direct),
+        resolver_strategies=(jamendo_resolver, archive_resolver),
+        download_strategies=(jamendo_downloader, archive_downloader),
         metadata_provider=None,
         max_candidates=3,
     )
@@ -164,6 +204,6 @@ async def test_unconfigured_primary_download_strategy_is_skipped_without_blockin
         tmp_path,
     )
 
-    assert result.track.source_id == "youtube_cookies-main"
-    assert remote.acquire_calls == []
-    assert youtube_direct.acquire_calls == ["main"]
+    assert result.track.source_id == "internet_archive-archive-track"
+    assert jamendo_downloader.acquire_calls == []
+    assert archive_downloader.acquire_calls == ["archive-track"]

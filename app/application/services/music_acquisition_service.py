@@ -50,6 +50,9 @@ class MusicDownloadStrategy(Protocol):
     async def skip_reason(self) -> str | None:
         ...
 
+    def supports_candidate(self, candidate: MusicTrack) -> bool:
+        ...
+
     async def acquire(self, query: MusicSearchQuery, candidate: MusicTrack, work_dir: Path) -> MusicDownloadArtifact:
         ...
 
@@ -157,12 +160,14 @@ class MusicProviderDownloadStrategy:
         cookie_provider: MusicCookieProvider | None = None,
         respect_health_state: bool = True,
         skip_probe: SkipProbe | None = None,
+        supported_sources: tuple[str, ...] | None = None,
     ) -> None:
         self.name = name
         self._provider = provider
         self._cookie_provider = cookie_provider
         self._respect_health_state = respect_health_state
         self._skip_probe = skip_probe
+        self._supported_sources = tuple(source.casefold() for source in supported_sources or ())
         self._logger = get_logger(__name__)
 
     async def skip_reason(self) -> str | None:
@@ -172,6 +177,11 @@ class MusicProviderDownloadStrategy:
         if self._skip_probe is None:
             return None
         return await self._skip_probe()
+
+    def supports_candidate(self, candidate: MusicTrack) -> bool:
+        if not self._supported_sources:
+            return True
+        return candidate.source_name.casefold() in self._supported_sources
 
     async def acquire(self, query: MusicSearchQuery, candidate: MusicTrack, work_dir: Path) -> MusicDownloadArtifact:
         cookies_file = await self._resolve_cookie_file()
@@ -268,100 +278,17 @@ class MusicAcquisitionService:
         failures: list[MusicAcquisitionFailure] = []
         blocked_resolver_strategies: set[str] = set()
         blocked_download_strategies: set[str] = set()
-        candidates = await self._resolve_candidates(
-            query,
-            failures=failures,
-            blocked_resolver_strategies=blocked_resolver_strategies,
-        )
+        found_any_candidates = False
 
-        for candidate in candidates:
-            for strategy in self._download_strategies:
-                if strategy.name in blocked_download_strategies:
-                    continue
-
-                skip_reason = await strategy.skip_reason()
-                if skip_reason is not None:
-                    failures.append(
-                        MusicAcquisitionFailure(
-                            strategy_name=strategy.name,
-                            stage="download",
-                            error_code=_skip_reason_error_code(skip_reason),
-                            source_id=candidate.source_id,
-                            message=skip_reason,
-                        )
-                    )
-                    log_event(
-                        self._logger,
-                        logging.INFO,
-                        "music_strategy_skipped",
-                        strategy_name=strategy.name,
-                        normalized_key=query.normalized_resource.normalized_key,
-                        source_id=candidate.source_id,
-                        stage="download",
-                        reason=skip_reason,
-                    )
-                    continue
-
-                try:
-                    artifact = await strategy.acquire(query, candidate, work_dir)
-                except MusicDownloadError as exc:
-                    failures.append(
-                        MusicAcquisitionFailure(
-                            strategy_name=strategy.name,
-                            stage="download",
-                            error_code=exc.error_code,
-                            source_id=candidate.source_id,
-                            message=str(exc),
-                        )
-                    )
-                    if is_auth_related_music_failure(exc.error_code):
-                        blocked_download_strategies.add(strategy.name)
-                    log_event(
-                        self._logger,
-                        logging.WARNING,
-                        "music_acquisition_attempt_failed",
-                        strategy_name=strategy.name,
-                        normalized_key=query.normalized_resource.normalized_key,
-                        source_id=candidate.source_id,
-                        error_code=exc.error_code,
-                    )
-                    continue
-
-                resolved_track = artifact.apply_to_track(candidate)
-                log_event(
-                    self._logger,
-                    logging.INFO,
-                    "music_acquisition_succeeded",
-                    strategy_name=strategy.name,
-                    normalized_key=query.normalized_resource.normalized_key,
-                    source_id=resolved_track.source_id,
-                    attempts=len(failures),
-                )
-                return MusicAcquisitionResult(
-                    track=resolved_track,
-                    source_audio_path=artifact.source_audio_path,
-                    strategy_name=strategy.name,
-                    attempts=tuple(failures),
-                )
-
-        raise self._build_exhausted_error(query, failures)
-
-    async def _resolve_candidates(
-        self,
-        query: MusicSearchQuery,
-        *,
-        failures: list[MusicAcquisitionFailure],
-        blocked_resolver_strategies: set[str],
-    ) -> list[MusicTrack]:
-        for strategy in self._resolver_strategies:
-            if strategy.name in blocked_resolver_strategies:
+        for resolver in self._resolver_strategies:
+            if resolver.name in blocked_resolver_strategies:
                 continue
 
-            skip_reason = await strategy.skip_reason()
+            skip_reason = await resolver.skip_reason()
             if skip_reason is not None:
                 failures.append(
                     MusicAcquisitionFailure(
-                        strategy_name=strategy.name,
+                        strategy_name=resolver.name,
                         stage="resolver",
                         error_code=_skip_reason_error_code(skip_reason),
                         message=skip_reason,
@@ -371,7 +298,7 @@ class MusicAcquisitionService:
                     self._logger,
                     logging.INFO,
                     "music_strategy_skipped",
-                    strategy_name=strategy.name,
+                    strategy_name=resolver.name,
                     normalized_key=query.normalized_resource.normalized_key,
                     stage="resolver",
                     reason=skip_reason,
@@ -379,48 +306,123 @@ class MusicAcquisitionService:
                 continue
 
             try:
-                candidates = await strategy.resolve_candidates(query, max_candidates=self._max_candidates)
+                candidates = await resolver.resolve_candidates(query, max_candidates=self._max_candidates)
             except MusicDownloadError as exc:
                 failures.append(
                     MusicAcquisitionFailure(
-                        strategy_name=strategy.name,
+                        strategy_name=resolver.name,
                         stage="resolver",
                         error_code=exc.error_code,
                         message=str(exc),
                     )
                 )
                 if is_auth_related_music_failure(exc.error_code):
-                    blocked_resolver_strategies.add(strategy.name)
+                    blocked_resolver_strategies.add(resolver.name)
                 log_event(
                     self._logger,
                     logging.WARNING,
                     "music_resolver_failed",
-                    strategy_name=strategy.name,
+                    strategy_name=resolver.name,
                     normalized_key=query.normalized_resource.normalized_key,
                     error_code=exc.error_code,
                 )
                 continue
 
-            if candidates:
+            if not candidates:
                 log_event(
                     self._logger,
                     logging.INFO,
-                    "music_resolver_selected_candidates",
-                    strategy_name=strategy.name,
+                    "music_resolver_empty",
+                    strategy_name=resolver.name,
                     normalized_key=query.normalized_resource.normalized_key,
-                    candidate_ids=[candidate.source_id for candidate in candidates],
                 )
-                return candidates[: self._max_candidates]
+                continue
 
+            found_any_candidates = True
             log_event(
                 self._logger,
                 logging.INFO,
-                "music_resolver_empty",
-                strategy_name=strategy.name,
+                "music_resolver_selected_candidates",
+                strategy_name=resolver.name,
                 normalized_key=query.normalized_resource.normalized_key,
+                candidate_ids=[candidate.source_id for candidate in candidates],
             )
 
+            for candidate in candidates[: self._max_candidates]:
+                for strategy in self._download_strategies:
+                    if strategy.name in blocked_download_strategies:
+                        continue
+                    if not strategy.supports_candidate(candidate):
+                        continue
+
+                    skip_reason = await strategy.skip_reason()
+                    if skip_reason is not None:
+                        failures.append(
+                            MusicAcquisitionFailure(
+                                strategy_name=strategy.name,
+                                stage="download",
+                                error_code=_skip_reason_error_code(skip_reason),
+                                source_id=candidate.source_id,
+                                message=skip_reason,
+                            )
+                        )
+                        log_event(
+                            self._logger,
+                            logging.INFO,
+                            "music_strategy_skipped",
+                            strategy_name=strategy.name,
+                            normalized_key=query.normalized_resource.normalized_key,
+                            source_id=candidate.source_id,
+                            stage="download",
+                            reason=skip_reason,
+                        )
+                        continue
+
+                    try:
+                        artifact = await strategy.acquire(query, candidate, work_dir)
+                    except MusicDownloadError as exc:
+                        failures.append(
+                            MusicAcquisitionFailure(
+                                strategy_name=strategy.name,
+                                stage="download",
+                                error_code=exc.error_code,
+                                source_id=candidate.source_id,
+                                message=str(exc),
+                            )
+                        )
+                        if is_auth_related_music_failure(exc.error_code):
+                            blocked_download_strategies.add(strategy.name)
+                        log_event(
+                            self._logger,
+                            logging.WARNING,
+                            "music_acquisition_attempt_failed",
+                            strategy_name=strategy.name,
+                            normalized_key=query.normalized_resource.normalized_key,
+                            source_id=candidate.source_id,
+                            error_code=exc.error_code,
+                        )
+                        continue
+
+                    resolved_track = artifact.apply_to_track(candidate)
+                    log_event(
+                        self._logger,
+                        logging.INFO,
+                        "music_acquisition_succeeded",
+                        strategy_name=strategy.name,
+                        normalized_key=query.normalized_resource.normalized_key,
+                        source_id=resolved_track.source_id,
+                        attempts=len(failures),
+                    )
+                    return MusicAcquisitionResult(
+                        track=resolved_track,
+                        source_audio_path=artifact.source_audio_path,
+                        strategy_name=strategy.name,
+                        attempts=tuple(failures),
+                    )
+
         if failures:
+            raise self._build_exhausted_error(query, failures)
+        if found_any_candidates:
             raise self._build_exhausted_error(query, failures)
         raise MusicNotFoundError()
 
