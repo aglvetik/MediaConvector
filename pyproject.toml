@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tiktok-telegram-downloader-bot"
 version = "1.0.0"
-description = "Production-grade Telegram bot for TikTok downloads and trigger-based music search."
+description = "Production-grade Telegram bot for TikTok downloads and video/audio conversion."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = { text = "MIT" }

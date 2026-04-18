@@ -9,15 +9,12 @@ from sqlalchemy.exc import IntegrityError
 
 from app.domain.entities.cache_entry import CacheEntry
 from app.domain.entities.download_job import DownloadJob
-from app.domain.entities.music_source_state import MusicSourceState, ensure_utc_aware
 from app.domain.enums.cache_status import CacheStatus
 from app.domain.enums.job_status import JobStatus
-from app.domain.enums.music_source_status import MusicSourceStatus
 from app.domain.enums.platform import Platform
 from app.infrastructure.persistence.sqlite.models import (
     DownloadJobModel,
     MediaCacheModel,
-    MusicSourceStateModel,
     ProcessedMessageModel,
     RequestLogModel,
 )
@@ -46,27 +43,6 @@ def _to_cache_entity(model: MediaCacheModel) -> CacheEntry:
         created_at=model.created_at,
         updated_at=model.updated_at,
         last_hit_at=model.last_hit_at,
-        raw_query=model.raw_query,
-        source_id=model.source_id,
-        title=model.title,
-        performer=model.performer,
-        thumbnail_url=model.thumbnail_url,
-        has_thumbnail=model.has_thumbnail,
-        file_name=model.file_name,
-        acquisition_backend=model.acquisition_backend,
-    )
-
-
-def _to_music_source_state_entity(model: MusicSourceStateModel) -> MusicSourceState:
-    return MusicSourceState(
-        source_name=model.source_name,
-        status=MusicSourceStatus(model.status),
-        consecutive_auth_failures=model.consecutive_auth_failures,
-        last_success_at=ensure_utc_aware(model.last_success_at),
-        last_auth_failure_at=ensure_utc_aware(model.last_auth_failure_at),
-        degraded_until=ensure_utc_aware(model.degraded_until),
-        last_error_code=model.last_error_code,
-        last_error_message=model.last_error_message,
     )
 
 
@@ -103,14 +79,6 @@ class SqlAlchemyCacheRepository:
                 cache_version=version,
                 hit_count=current.hit_count if current else 0,
                 last_hit_at=current.last_hit_at if current else None,
-                raw_query=current.raw_query if current else entry.raw_query,
-                source_id=current.source_id if current else entry.source_id,
-                title=current.title if current else entry.title,
-                performer=current.performer if current else entry.performer,
-                thumbnail_url=current.thumbnail_url if current else entry.thumbnail_url,
-                has_thumbnail=current.has_thumbnail if current else entry.has_thumbnail,
-                file_name=current.file_name if current else entry.file_name,
-                acquisition_backend=current.acquisition_backend if current else entry.acquisition_backend,
             )
             stmt = stmt.on_conflict_do_update(
                 index_elements=[MediaCacheModel.normalized_key],
@@ -121,14 +89,6 @@ class SqlAlchemyCacheRepository:
                     "status": CacheStatus.PROCESSING.value,
                     "is_valid": True,
                     "updated_at": datetime.now(timezone.utc),
-                    "raw_query": current.raw_query if current else entry.raw_query,
-                    "source_id": current.source_id if current else entry.source_id,
-                    "title": current.title if current else entry.title,
-                    "performer": current.performer if current else entry.performer,
-                    "thumbnail_url": current.thumbnail_url if current else entry.thumbnail_url,
-                    "has_thumbnail": current.has_thumbnail if current else entry.has_thumbnail,
-                    "file_name": current.file_name if current else entry.file_name,
-                    "acquisition_backend": current.acquisition_backend if current else entry.acquisition_backend,
                 },
             )
             await session.execute(stmt)
@@ -161,14 +121,6 @@ class SqlAlchemyCacheRepository:
                 cache_version=version,
                 hit_count=current.hit_count if current else entry.hit_count,
                 last_hit_at=entry.last_hit_at,
-                raw_query=entry.raw_query,
-                source_id=entry.source_id,
-                title=entry.title,
-                performer=entry.performer,
-                thumbnail_url=entry.thumbnail_url,
-                has_thumbnail=entry.has_thumbnail,
-                file_name=entry.file_name,
-                acquisition_backend=entry.acquisition_backend,
             )
             stmt = stmt.on_conflict_do_update(
                 index_elements=[MediaCacheModel.normalized_key],
@@ -189,14 +141,6 @@ class SqlAlchemyCacheRepository:
                     "cache_version": version,
                     "last_hit_at": entry.last_hit_at,
                     "updated_at": datetime.now(timezone.utc),
-                    "raw_query": entry.raw_query,
-                    "source_id": entry.source_id,
-                    "title": entry.title,
-                    "performer": entry.performer,
-                    "thumbnail_url": entry.thumbnail_url,
-                    "has_thumbnail": entry.has_thumbnail,
-                    "file_name": entry.file_name,
-                    "acquisition_backend": entry.acquisition_backend,
                 },
             )
             await session.execute(stmt)
@@ -426,59 +370,3 @@ class SqlAlchemyRequestLogRepository:
         async with self._database.session() as session:
             result = await session.execute(select(func.count()).select_from(RequestLogModel))
             return int(result.scalar_one())
-
-
-class SqlAlchemyMusicSourceStateRepository:
-    def __init__(self, database: Database) -> None:
-        self._database = database
-
-    async def get(self, source_name: str) -> MusicSourceState | None:
-        async with self._database.session() as session:
-            result = await session.execute(
-                select(MusicSourceStateModel).where(MusicSourceStateModel.source_name == source_name)
-            )
-            model = result.scalar_one_or_none()
-            return _to_music_source_state_entity(model) if model else None
-
-    async def save(self, state: MusicSourceState) -> MusicSourceState:
-        normalized_state = MusicSourceState(
-            source_name=state.source_name,
-            status=state.status,
-            consecutive_auth_failures=state.consecutive_auth_failures,
-            last_success_at=ensure_utc_aware(state.last_success_at),
-            last_auth_failure_at=ensure_utc_aware(state.last_auth_failure_at),
-            degraded_until=ensure_utc_aware(state.degraded_until),
-            last_error_code=state.last_error_code,
-            last_error_message=state.last_error_message,
-        )
-        async with self._database.session() as session:
-            stmt = insert(MusicSourceStateModel).values(
-                source_name=normalized_state.source_name,
-                status=normalized_state.status.value,
-                consecutive_auth_failures=normalized_state.consecutive_auth_failures,
-                last_success_at=normalized_state.last_success_at,
-                last_auth_failure_at=normalized_state.last_auth_failure_at,
-                degraded_until=normalized_state.degraded_until,
-                last_error_code=normalized_state.last_error_code,
-                last_error_message=normalized_state.last_error_message,
-            )
-            stmt = stmt.on_conflict_do_update(
-                index_elements=[MusicSourceStateModel.source_name],
-                set_={
-                    "status": normalized_state.status.value,
-                    "consecutive_auth_failures": normalized_state.consecutive_auth_failures,
-                    "last_success_at": normalized_state.last_success_at,
-                    "last_auth_failure_at": normalized_state.last_auth_failure_at,
-                    "degraded_until": normalized_state.degraded_until,
-                    "last_error_code": normalized_state.last_error_code,
-                    "last_error_message": normalized_state.last_error_message,
-                    "updated_at": datetime.now(timezone.utc),
-                },
-            )
-            await session.execute(stmt)
-            await session.commit()
-
-        saved = await self.get(normalized_state.source_name)
-        if saved is None:
-            raise RuntimeError("Failed to save music source state.")
-        return saved

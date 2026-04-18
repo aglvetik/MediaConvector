@@ -29,14 +29,6 @@ class MediaCacheModel(Base):
     cache_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     hit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_hit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    raw_query: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    title: Mapped[str | None] = mapped_column(Text, nullable=True)
-    performer: Mapped[str | None] = mapped_column(Text, nullable=True)
-    thumbnail_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    has_thumbnail: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    file_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    acquisition_backend: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class RequestLogModel(Base):
@@ -91,16 +83,3 @@ class ProcessedMessageModel(Base):
         UniqueConstraint("chat_id", "message_id", "normalized_key", name="uq_processed_message_identity"),
         Index("ix_processed_messages_status", "status"),
     )
-
-
-class MusicSourceStateModel(Base):
-    __tablename__ = "music_source_states"
-
-    source_name: Mapped[str] = mapped_column(String(64), primary_key=True)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    consecutive_auth_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_auth_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    degraded_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -1,7 +1,6 @@
 from app.infrastructure.persistence.sqlite.repositories import (
     SqlAlchemyCacheRepository,
     SqlAlchemyDownloadJobRepository,
-    SqlAlchemyMusicSourceStateRepository,
     SqlAlchemyProcessedMessageRepository,
     SqlAlchemyRequestLogRepository,
 )
@@ -11,7 +10,6 @@ __all__ = [
     "Database",
     "SqlAlchemyCacheRepository",
     "SqlAlchemyDownloadJobRepository",
-    "SqlAlchemyMusicSourceStateRepository",
     "SqlAlchemyProcessedMessageRepository",
     "SqlAlchemyRequestLogRepository",
 ]

@@ -10,14 +10,11 @@ from app import messages
 from app.application.services.delivery_service import DeliveryService
 from app.application.services.media_pipeline_service import MediaPipelineService
 from app.application.services.metrics_service import MetricsService
-from app.application.services.music_pipeline_service import MusicPipelineService
-from app.application.services.music_search_service import MusicSearchService
 from app.application.services.rate_limit_service import RateLimitService
 from app.application.services.user_request_guard_service import UserRequestGuardService
 from app.domain.entities.media_request import MediaRequest
 from app.domain.entities.media_result import MediaResult
 from app.domain.entities.normalized_resource import NormalizedResource
-from app.domain.entities.music_search_query import MusicSearchQuery
 from app.domain.errors import AppError
 from app.domain.interfaces.provider import DownloaderProvider
 from app.domain.interfaces.repositories import ProcessedMessageRepository, RequestLogRepository
@@ -40,8 +37,6 @@ class ProcessMessageService:
         providers: tuple[DownloaderProvider, ...],
         delivery_service: DeliveryService,
         media_pipeline_service: MediaPipelineService,
-        music_search_service: MusicSearchService,
-        music_pipeline_service: MusicPipelineService,
         rate_limit_service: RateLimitService,
         user_request_guard_service: UserRequestGuardService,
         processed_message_repository: ProcessedMessageRepository,
@@ -51,8 +46,6 @@ class ProcessMessageService:
         self._providers = providers
         self._delivery_service = delivery_service
         self._media_pipeline_service = media_pipeline_service
-        self._music_search_service = music_search_service
-        self._music_pipeline_service = music_pipeline_service
         self._rate_limit_service = rate_limit_service
         self._user_request_guard_service = user_request_guard_service
         self._processed_message_repository = processed_message_repository
@@ -74,11 +67,6 @@ class ProcessMessageService:
             chat_type=incoming.chat_type,
         )
         try:
-            music_query = self._music_search_service.parse_message(incoming.text)
-            if music_query is not None:
-                normalized_key = music_query.normalized_resource.normalized_key
-                return await self._handle_music_message(request_id, incoming, music_query)
-
             provider, detected_url = self._detect_provider(incoming.text)
             if provider is None or detected_url is None:
                 return False
@@ -115,7 +103,7 @@ class ProcessMessageService:
                 error_code=exc.error_code,
             )
             return True
-        except Exception as exc:
+        except Exception:
             self._logger.exception("unexpected_error_traceback")
             await self._safe_send_user_message(incoming.chat_id, messages.UNKNOWN_ERROR, incoming.message_id)
             log_event(
@@ -129,16 +117,6 @@ class ProcessMessageService:
                 error_code="unexpected_error",
             )
             return True
-
-    async def _handle_music_message(self, request_id: str, incoming: IncomingMessage, music_query: MusicSearchQuery) -> bool:
-        self._metrics.increment("music_requests_total")
-        return await self._execute_flow(
-            request_id=request_id,
-            incoming=incoming,
-            normalized=music_query.normalized_resource,
-            loading_text=messages.MUSIC_LOADING_MESSAGE,
-            pipeline_runner=lambda request: self._music_pipeline_service.process(request, music_query),
-        )
 
     async def _execute_flow(
         self,
@@ -225,7 +203,7 @@ class ProcessMessageService:
                 error_code=exc.error_code,
             )
             return True
-        except Exception as exc:
+        except Exception:
             self._logger.exception("unexpected_error_traceback")
             error_code = "unexpected_error"
             await self._safe_send_user_message(incoming.chat_id, messages.UNKNOWN_ERROR, incoming.message_id)

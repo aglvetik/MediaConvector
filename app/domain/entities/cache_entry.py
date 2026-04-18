@@ -29,14 +29,6 @@ class CacheEntry:
     created_at: datetime | None
     updated_at: datetime | None
     last_hit_at: datetime | None
-    raw_query: str | None = None
-    source_id: str | None = None
-    title: str | None = None
-    performer: str | None = None
-    thumbnail_url: str | None = None
-    has_thumbnail: bool = False
-    file_name: str | None = None
-    acquisition_backend: str | None = None
 
     @property
     def is_ready_for_video(self) -> bool:

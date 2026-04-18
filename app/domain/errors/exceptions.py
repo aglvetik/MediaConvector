@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app import messages
-from app.domain.enums import MusicFailureCode
 
 
 @dataclass(slots=True)
@@ -104,39 +103,3 @@ class RateLimitExceededError(AppError):
 class ProcessingConflictError(AppError):
     def __init__(self, message: str = "Message already processed.") -> None:
         super().__init__(message=message, user_message="", error_code="processing_conflict")
-
-
-class MusicQueryValidationError(AppError):
-    def __init__(self, message: str, *, user_message: str, context: dict[str, object] | None = None) -> None:
-        super().__init__(
-            message=message,
-            user_message=user_message,
-            error_code=MusicFailureCode.INVALID_QUERY.value,
-            context=context or {},
-        )
-
-
-class MusicNotFoundError(AppError):
-    def __init__(self, message: str = "No track search results.") -> None:
-        super().__init__(
-            message=message,
-            user_message=messages.MUSIC_NOT_FOUND,
-            error_code=MusicFailureCode.RESOLVER_EMPTY.value,
-        )
-
-
-class MusicDownloadError(AppError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        error_code: str = MusicFailureCode.DOWNLOAD_FAILED.value,
-        user_message: str | None = None,
-        context: dict[str, object] | None = None,
-    ) -> None:
-        super().__init__(
-            message=message,
-            user_message=user_message or messages.MUSIC_DOWNLOAD_FAILED,
-            error_code=error_code,
-            context=context or {},
-        )

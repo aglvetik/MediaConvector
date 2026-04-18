@@ -2,10 +2,6 @@ from app.domain.entities.cache_entry import CacheEntry
 from app.domain.entities.download_job import DownloadJob
 from app.domain.entities.media_request import MediaRequest
 from app.domain.entities.media_result import DeliveryReceipt, MediaMetadata, MediaResult
-from app.domain.entities.music_download_artifact import MusicDownloadArtifact
-from app.domain.entities.music_search_query import MusicSearchQuery
-from app.domain.entities.music_source_state import MusicSourceState
-from app.domain.entities.music_track import MusicTrack
 from app.domain.entities.normalized_resource import NormalizedResource
 
 __all__ = [
@@ -15,9 +11,5 @@ __all__ = [
     "MediaMetadata",
     "MediaRequest",
     "MediaResult",
-    "MusicDownloadArtifact",
-    "MusicSearchQuery",
-    "MusicSourceState",
-    "MusicTrack",
     "NormalizedResource",
 ]

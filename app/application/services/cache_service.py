@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from app.domain.entities.cache_entry import CacheEntry
 from app.domain.entities.media_result import DeliveryReceipt, MediaMetadata
-from app.domain.entities.music_track import MusicTrack
 from app.domain.entities.normalized_resource import NormalizedResource
 from app.domain.enums.cache_status import CacheStatus
 from app.domain.interfaces.repositories import CacheRepository
@@ -64,7 +63,11 @@ class CacheService:
         previous_entry: CacheEntry | None = None,
         notice: str | None = None,
     ) -> CacheEntry:
-        source_has_audio = self._resolve_source_has_audio(metadata=metadata, previous_entry=previous_entry, audio_receipt=audio_receipt)
+        source_has_audio = self._resolve_source_has_audio(
+            metadata=metadata,
+            previous_entry=previous_entry,
+            audio_receipt=audio_receipt,
+        )
         status = CacheStatus.READY if source_has_audio and audio_receipt is not None else CacheStatus.PARTIAL
         entry = CacheEntry(
             id=previous_entry.id if previous_entry else None,
@@ -100,59 +103,6 @@ class CacheService:
         )
         return saved
 
-    async def save_music_result(
-        self,
-        *,
-        resource: NormalizedResource,
-        raw_query: str,
-        track: MusicTrack,
-        audio_receipt: DeliveryReceipt | None,
-        file_name: str,
-        has_thumbnail: bool,
-        acquisition_backend: str,
-        previous_entry: CacheEntry | None = None,
-    ) -> CacheEntry:
-        entry = CacheEntry(
-            id=previous_entry.id if previous_entry else None,
-            platform=resource.platform,
-            normalized_key=resource.normalized_key,
-            original_url=raw_query,
-            canonical_url=track.canonical_url,
-            video_file_id=None,
-            audio_file_id=audio_receipt.file_id if audio_receipt else None,
-            video_file_unique_id=None,
-            audio_file_unique_id=audio_receipt.file_unique_id if audio_receipt else None,
-            duration_sec=track.duration_sec,
-            video_size_bytes=None,
-            audio_size_bytes=audio_receipt.size_bytes if audio_receipt else None,
-            has_audio=audio_receipt is not None,
-            status=CacheStatus.READY if audio_receipt is not None else CacheStatus.FAILED,
-            is_valid=audio_receipt is not None,
-            cache_version=previous_entry.cache_version if previous_entry else 1,
-            hit_count=previous_entry.hit_count if previous_entry else 0,
-            created_at=previous_entry.created_at if previous_entry else None,
-            updated_at=None,
-            last_hit_at=previous_entry.last_hit_at if previous_entry else None,
-            raw_query=raw_query,
-            source_id=track.source_id,
-            title=track.title,
-            performer=track.performer,
-            thumbnail_url=track.thumbnail_url,
-            has_thumbnail=has_thumbnail,
-            file_name=file_name,
-            acquisition_backend=acquisition_backend,
-        )
-        saved = await self._repository.save_result(entry)
-        log_event(
-            self._logger,
-            20,
-            "cache_saved",
-            normalized_key=resource.normalized_key,
-            status=saved.status.value,
-            source_id=saved.source_id,
-        )
-        return saved
-
     async def save_audio_refresh(
         self,
         *,
@@ -161,7 +111,11 @@ class CacheService:
         audio_receipt: DeliveryReceipt | None,
         metadata: MediaMetadata | None = None,
     ) -> CacheEntry:
-        source_has_audio = self._resolve_source_has_audio(metadata=metadata, previous_entry=previous_entry, audio_receipt=audio_receipt)
+        source_has_audio = self._resolve_source_has_audio(
+            metadata=metadata,
+            previous_entry=previous_entry,
+            audio_receipt=audio_receipt,
+        )
         entry = CacheEntry(
             id=previous_entry.id,
             platform=resource.platform,
@@ -208,53 +162,6 @@ class CacheService:
             created_at=previous_entry.created_at if previous_entry else None,
             updated_at=None,
             last_hit_at=previous_entry.last_hit_at if previous_entry else None,
-            raw_query=previous_entry.raw_query if previous_entry else None,
-            source_id=previous_entry.source_id if previous_entry else None,
-            title=previous_entry.title if previous_entry else None,
-            performer=previous_entry.performer if previous_entry else None,
-            thumbnail_url=previous_entry.thumbnail_url if previous_entry else None,
-            has_thumbnail=previous_entry.has_thumbnail if previous_entry else False,
-            file_name=previous_entry.file_name if previous_entry else None,
-            acquisition_backend=previous_entry.acquisition_backend if previous_entry else None,
-        )
-        return await self._repository.save_result(entry)
-
-    async def save_music_failed(
-        self,
-        *,
-        resource: NormalizedResource,
-        raw_query: str,
-        previous_entry: CacheEntry | None = None,
-    ) -> CacheEntry:
-        entry = CacheEntry(
-            id=previous_entry.id if previous_entry else None,
-            platform=resource.platform,
-            normalized_key=resource.normalized_key,
-            original_url=raw_query,
-            canonical_url=previous_entry.canonical_url if previous_entry else resource.canonical_url,
-            video_file_id=None,
-            audio_file_id=previous_entry.audio_file_id if previous_entry else None,
-            video_file_unique_id=None,
-            audio_file_unique_id=previous_entry.audio_file_unique_id if previous_entry else None,
-            duration_sec=previous_entry.duration_sec if previous_entry else None,
-            video_size_bytes=None,
-            audio_size_bytes=previous_entry.audio_size_bytes if previous_entry else None,
-            has_audio=previous_entry.has_audio if previous_entry else False,
-            status=CacheStatus.FAILED,
-            is_valid=False,
-            cache_version=previous_entry.cache_version if previous_entry else 1,
-            hit_count=previous_entry.hit_count if previous_entry else 0,
-            created_at=previous_entry.created_at if previous_entry else None,
-            updated_at=None,
-            last_hit_at=previous_entry.last_hit_at if previous_entry else None,
-            raw_query=raw_query,
-            source_id=previous_entry.source_id if previous_entry else None,
-            title=previous_entry.title if previous_entry else None,
-            performer=previous_entry.performer if previous_entry else None,
-            thumbnail_url=previous_entry.thumbnail_url if previous_entry else None,
-            has_thumbnail=previous_entry.has_thumbnail if previous_entry else False,
-            file_name=previous_entry.file_name if previous_entry else None,
-            acquisition_backend=previous_entry.acquisition_backend if previous_entry else None,
         )
         return await self._repository.save_result(entry)
 

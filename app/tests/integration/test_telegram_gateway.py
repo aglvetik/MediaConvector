@@ -47,7 +47,7 @@ async def test_aiogram_gateway_uploads_media(tmp_path: Path) -> None:
     audio_path.write_bytes(b"audio")
     loading_message_id = await gateway.send_loading_message(1, text="loading")
     video_receipt = await gateway.send_video_by_upload(1, video_path, "caption")
-    audio_receipt = await gateway.send_audio_by_upload(1, audio_path, None, title="Song", performer="Artist", file_name="Artist - Song.mp3")
+    audio_receipt = await gateway.send_audio_by_upload(1, audio_path, None)
     assert loading_message_id == 99
     assert video_receipt.file_id == "vid"
     assert audio_receipt.file_id == "aud"
