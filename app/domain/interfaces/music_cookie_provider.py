@@ -9,7 +9,7 @@ from app.domain.entities.music_source_state import MusicSourceState
 class MusicCookieProvider(Protocol):
     source_name: str
 
-    async def get_cookie_file(self) -> Path:
+    async def get_cookie_file(self) -> Path | None:
         ...
 
     async def mark_success(self) -> None:

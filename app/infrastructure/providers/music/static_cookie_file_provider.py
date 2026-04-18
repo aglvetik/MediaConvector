@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
-from app import messages
 from app.application.services.music_source_health_service import MusicSourceHealthService
 from app.domain.entities.music_source_state import MusicSourceState
 from app.domain.enums import MusicFailureCode
-from app.domain.errors import MusicDownloadError
 from app.infrastructure.logging import get_logger, log_event
 
 
@@ -24,28 +23,28 @@ class StaticCookieFileProvider:
         self._health_service = health_service
         self._logger = get_logger(__name__)
 
-    async def get_cookie_file(self) -> Path:
-        if self._cookies_file is None:
+    async def get_cookie_file(self) -> Path | None:
+        if not self._cookies_file:
+            log_event(
+                self._logger,
+                logging.WARNING,
+                "cookies_missing",
+                source_name=self.source_name,
+                cookies_file=None,
+            )
             await self.mark_failure(
                 MusicFailureCode.COOKIES_MISSING.value,
                 error_message="YTDLP_COOKIES_FILE is not configured.",
             )
-            raise MusicDownloadError(
-                "Music cookies file is not configured.",
-                error_code=MusicFailureCode.COOKIES_MISSING.value,
-                user_message=messages.MUSIC_SOURCE_DEGRADED,
-            )
+            return None
 
-        resolved_path = self._cookies_file.expanduser()
-        if not resolved_path.is_absolute():
-            resolved_path = Path.cwd() / resolved_path
-        resolved_path = resolved_path.resolve()
+        resolved_path = self._cookies_file.expanduser().resolve(strict=False)
 
-        if not resolved_path.exists() or not resolved_path.is_file():
+        if not os.path.exists(resolved_path) or not resolved_path.is_file():
             log_event(
                 self._logger,
-                logging.ERROR,
-                "music_cookies_missing",
+                logging.WARNING,
+                "cookies_missing",
                 source_name=self.source_name,
                 cookies_file=str(resolved_path),
             )
@@ -53,12 +52,7 @@ class StaticCookieFileProvider:
                 MusicFailureCode.COOKIES_MISSING.value,
                 error_message=f"Missing cookies file: {resolved_path}",
             )
-            raise MusicDownloadError(
-                "Configured music cookies file does not exist.",
-                error_code=MusicFailureCode.COOKIES_MISSING.value,
-                user_message=messages.MUSIC_SOURCE_DEGRADED,
-                context={"cookies_file": str(resolved_path)},
-            )
+            return None
 
         return resolved_path
 

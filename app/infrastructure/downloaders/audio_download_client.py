@@ -102,6 +102,14 @@ class AudioDownloadClient:
                 return ydl.extract_info(source_url, download=True)
         except yt_dlp.utils.DownloadError as exc:
             error_code = classify_ytdlp_music_error(str(exc))
+            self._logger.exception(
+                "yt_dlp_failure",
+                extra={
+                    "source_url": source_url,
+                    "error_code": error_code.value,
+                    "raw_error": str(exc),
+                },
+            )
             raise MusicDownloadError(
                 str(exc),
                 error_code=error_code.value,

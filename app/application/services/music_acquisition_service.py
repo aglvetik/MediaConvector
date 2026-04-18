@@ -73,6 +73,12 @@ class YoutubeAcquisitionStrategy:
 
     async def resolve_candidates(self, query: MusicSearchQuery, *, max_candidates: int) -> list[MusicTrack]:
         cookies_file = await self._resolve_cookie_file()
+        if self._cookie_provider is not None and cookies_file is None:
+            raise MusicDownloadError(
+                "Music cookies file is unavailable for resolver step.",
+                error_code=MusicFailureCode.COOKIES_MISSING.value,
+                user_message=messages.MUSIC_SOURCE_DEGRADED,
+            )
         try:
             candidates = await self._provider.resolve_candidates(
                 query.raw_query,
@@ -86,6 +92,12 @@ class YoutubeAcquisitionStrategy:
 
     async def acquire(self, candidate: MusicTrack, work_dir: Path) -> Path:
         cookies_file = await self._resolve_cookie_file()
+        if self._cookie_provider is not None and cookies_file is None:
+            raise MusicDownloadError(
+                "Music cookies file is unavailable for download step.",
+                error_code=MusicFailureCode.COOKIES_MISSING.value,
+                user_message=messages.MUSIC_SOURCE_DEGRADED,
+            )
         try:
             output_path = await self._downloader.download_audio_source(
                 candidate,

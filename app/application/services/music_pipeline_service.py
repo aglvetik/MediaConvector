@@ -145,6 +145,7 @@ class MusicPipelineService:
             await self._job_repository.update_status(job.request_id, JobStatus.COMPLETED)
             return MusicOwnerPipelineResult(media_result=media_result, cache_entry=cache_entry)
         except Exception as exc:
+            self._logger.exception("music_pipeline_crash")
             previous_entry = await self._cache_service.get_entry(query.normalized_resource.normalized_key)
             await self._cache_service.save_music_failed(
                 resource=query.normalized_resource,

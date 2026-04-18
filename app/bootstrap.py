@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 from dataclasses import dataclass
 
 from aiogram import Bot
@@ -35,6 +37,7 @@ from app.infrastructure.persistence.sqlite import (
 from app.infrastructure.providers import StaticCookieFileProvider, TikTokProvider, YouTubeMusicProvider
 from app.infrastructure.telegram import AiogramTelegramGateway
 from app.infrastructure.temp import TempFileManager
+from app.infrastructure.logging import get_logger, log_event
 from app.workers import CleanupWorker, HealthWorker
 
 
@@ -54,9 +57,31 @@ class AppContainer:
 
 
 def build_container(settings: Settings) -> AppContainer:
+    logger = get_logger(__name__)
     database = Database(settings.database_url)
     bot = Bot(token=settings.bot_token)
     gateway = AiogramTelegramGateway(bot=bot, max_file_size_bytes=settings.max_file_size_bytes)
+    cookies_file = settings.resolved_ytdlp_cookies_file
+
+    logger.info("cookies_path", extra={"path": str(cookies_file) if cookies_file is not None else None})
+    logger.info(
+        "startup_paths",
+        extra={
+            "cookies": str(cookies_file) if cookies_file is not None else None,
+            "cookies_exists": bool(cookies_file and os.path.exists(cookies_file)),
+            "ffmpeg": settings.ffmpeg_path,
+            "ytdlp": settings.ytdlp_path,
+        },
+    )
+    log_event(
+        logger,
+        logging.INFO,
+        "startup_paths",
+        cookies=str(cookies_file) if cookies_file is not None else None,
+        cookies_exists=bool(cookies_file and os.path.exists(cookies_file)),
+        ffmpeg=settings.ffmpeg_path,
+        ytdlp=settings.ytdlp_path,
+    )
 
     cache_repository = SqlAlchemyCacheRepository(database)
     download_job_repository = SqlAlchemyDownloadJobRepository(database)
@@ -113,9 +138,9 @@ def build_container(settings: Settings) -> AppContainer:
             respect_health_state=False,
         ),
     }
-    if settings.ytdlp_cookies_file is not None:
+    if cookies_file is not None:
         cookie_provider = StaticCookieFileProvider(
-            cookies_file=settings.ytdlp_cookies_file,
+            cookies_file=cookies_file,
             health_service=music_source_health_service,
         )
         strategy_registry["youtube_cookies"] = YoutubeAcquisitionStrategy(

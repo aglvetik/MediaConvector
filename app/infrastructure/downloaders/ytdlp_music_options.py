@@ -29,10 +29,7 @@ def build_music_ytdlp_options(
         )
         return options
 
-    resolved_path = cookies_file.expanduser()
-    if not resolved_path.is_absolute():
-        resolved_path = Path.cwd() / resolved_path
-    resolved_path = resolved_path.resolve()
+    resolved_path = cookies_file.expanduser().resolve(strict=False)
 
     if not resolved_path.exists() or not resolved_path.is_file():
         log_event(

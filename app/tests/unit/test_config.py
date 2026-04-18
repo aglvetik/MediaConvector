@@ -24,3 +24,13 @@ def test_settings_load_with_minimal_required_env(monkeypatch, tmp_path) -> None:
     assert settings.music_audio_only is True
     assert settings.cookie_healthcheck_enabled is True
     assert settings.ytdlp_cookies_file is None
+
+
+def test_settings_treats_empty_cookies_path_as_none(monkeypatch) -> None:
+    monkeypatch.setenv("BOT_TOKEN", "123:test-token")
+    monkeypatch.setenv("YTDLP_COOKIES_FILE", "")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.ytdlp_cookies_file is None
+    assert settings.resolved_ytdlp_cookies_file is None

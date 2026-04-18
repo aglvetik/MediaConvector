@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
@@ -74,6 +76,15 @@ class Settings(BaseSettings):
             raise ValueError("Time interval values must be >= 1 minute.")
         return value
 
+    @field_validator("ytdlp_cookies_file", mode="before")
+    @classmethod
+    def _empty_cookie_path_to_none(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @property
     def max_file_size_bytes(self) -> int:
         return self.max_file_size_mb * 1024 * 1024
@@ -110,6 +121,15 @@ class Settings(BaseSettings):
         if values:
             return values
         return ("youtube_cookies", "youtube_no_cookies")
+
+    @property
+    def resolved_ytdlp_cookies_file(self) -> Path | None:
+        if self.ytdlp_cookies_file is None:
+            return None
+        cookies_path = self.ytdlp_cookies_file.expanduser()
+        if not cookies_path.is_absolute():
+            cookies_path = _PROJECT_ROOT / cookies_path
+        return cookies_path.resolve(strict=False)
 
 
 def load_settings() -> Settings:

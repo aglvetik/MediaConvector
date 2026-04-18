@@ -115,7 +115,8 @@ class ProcessMessageService:
                 error_code=exc.error_code,
             )
             return True
-        except Exception:
+        except Exception as exc:
+            self._logger.exception("unexpected_error_traceback")
             await self._safe_send_user_message(incoming.chat_id, messages.UNKNOWN_ERROR, incoming.message_id)
             log_event(
                 self._logger,
@@ -224,7 +225,8 @@ class ProcessMessageService:
                 error_code=exc.error_code,
             )
             return True
-        except Exception:
+        except Exception as exc:
+            self._logger.exception("unexpected_error_traceback")
             error_code = "unexpected_error"
             await self._safe_send_user_message(incoming.chat_id, messages.UNKNOWN_ERROR, incoming.message_id)
             log_event(
