@@ -44,15 +44,11 @@ class YouTubeMusicProvider:
             return track
 
     def _search(self, query: str) -> dict[str, Any]:
+        # Keep the search path close to the known-good standalone yt-dlp usage.
         options: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
-            "extract_flat": False,
-            "skip_download": True,
-            "noplaylist": True,
-            "cachedir": False,
-            "socket_timeout": self._timeout_seconds,
-            "extractor_retries": 3,
+            "extract_flat": True,
         }
         options = build_music_ytdlp_options(
             options,

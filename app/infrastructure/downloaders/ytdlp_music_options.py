@@ -17,6 +17,14 @@ def build_music_ytdlp_options(
 ) -> dict[str, Any]:
     options = dict(base_options)
     if cookies_file is None:
+        log_event(
+            logger,
+            logging.INFO,
+            "music_ytdlp_options_prepared",
+            operation=operation,
+            cookies_enabled=False,
+            cookies_file=None,
+        )
         return options
 
     resolved_path = cookies_file.expanduser()
@@ -39,4 +47,12 @@ def build_music_ytdlp_options(
 
     # yt-dlp Python API uses `cookiefile`, which is the equivalent of CLI `--cookies <path>`.
     options["cookiefile"] = str(resolved_path)
+    log_event(
+        logger,
+        logging.INFO,
+        "music_ytdlp_options_prepared",
+        operation=operation,
+        cookies_enabled=True,
+        cookies_file=str(resolved_path),
+    )
     return options
