@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.domain.entities.cache_entry import CacheEntry
 from app.domain.entities.download_job import DownloadJob
@@ -97,3 +97,29 @@ async def test_repository_roundtrip(database) -> None:
     assert fetched_state.status == MusicSourceStatus.SUSPECT
     assert fetched_state.last_error_code == "login_required"
     assert persisted_state.source_name == fetched_state.source_name
+
+
+async def test_music_source_state_repository_roundtrip_normalizes_utc_datetimes(database) -> None:
+    music_source_repo = SqlAlchemyMusicSourceStateRepository(database)
+    future_degraded_until = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+    await music_source_repo.save(
+        MusicSourceState(
+            source_name="youtube_cookies",
+            status=MusicSourceStatus.BROKEN,
+            consecutive_auth_failures=2,
+            last_success_at=datetime.now(timezone.utc),
+            last_auth_failure_at=datetime.now(timezone.utc),
+            degraded_until=future_degraded_until,
+            last_error_code="login_required",
+            last_error_message="login required",
+        )
+    )
+
+    fetched_state = await music_source_repo.get("youtube_cookies")
+
+    assert fetched_state is not None
+    assert fetched_state.degraded_until is not None
+    assert fetched_state.degraded_until.tzinfo is not None
+    assert fetched_state.degraded_until.utcoffset() == timezone.utc.utcoffset(fetched_state.degraded_until)
+    assert fetched_state.is_degraded() is True

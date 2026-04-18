@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from app.application.services.music_source_health_service import MusicSourceHealthService
 from app.domain.entities.music_source_state import MusicSourceState
 from app.domain.enums import MusicFailureCode, MusicSourceStatus
@@ -69,3 +71,43 @@ async def test_success_recovers_source_health_after_degraded_mode() -> None:
     assert recovered.consecutive_auth_failures == 0
     assert recovered.degraded_until is None
     assert recovered.last_success_at is not None
+
+
+def test_is_degraded_true_for_future_datetime() -> None:
+    state = MusicSourceState(
+        source_name="youtube_cookies",
+        status=MusicSourceStatus.BROKEN,
+        consecutive_auth_failures=2,
+        last_success_at=None,
+        last_auth_failure_at=datetime.now(timezone.utc),
+        degraded_until=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    assert state.is_degraded() is True
+
+
+def test_is_degraded_false_for_past_datetime() -> None:
+    state = MusicSourceState(
+        source_name="youtube_cookies",
+        status=MusicSourceStatus.BROKEN,
+        consecutive_auth_failures=2,
+        last_success_at=None,
+        last_auth_failure_at=datetime.now(timezone.utc),
+        degraded_until=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+
+    assert state.is_degraded() is False
+
+
+def test_is_degraded_handles_naive_degraded_until_without_type_error() -> None:
+    naive_future = datetime.utcnow() + timedelta(minutes=5)
+    state = MusicSourceState(
+        source_name="youtube_cookies",
+        status=MusicSourceStatus.BROKEN,
+        consecutive_auth_failures=2,
+        last_success_at=None,
+        last_auth_failure_at=datetime.utcnow(),
+        degraded_until=naive_future,
+    )
+
+    assert state.is_degraded(now=datetime.now(timezone.utc)) is True
