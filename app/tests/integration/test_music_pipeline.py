@@ -3,18 +3,18 @@ from app.domain.entities.music_track import MusicTrack
 
 
 async def test_music_audio_cache_reuse(service_harness) -> None:
-    query = "найти after dark"
+    query = "\u043d\u0430\u0439\u0442\u0438 after dark"
     await service_harness.process_message_service.handle_message(
         IncomingMessage(chat_id=1, user_id=501, message_id=1, chat_type="private", text=query)
     )
     await service_harness.process_message_service.handle_message(
         IncomingMessage(chat_id=1, user_id=601, message_id=2, chat_type="private", text=query)
     )
-    assert service_harness.audio_downloader.download_calls["after_dark"] == 1
+    assert service_harness.remote_downloader.download_calls["after_dark"] == 1
 
 
 async def test_music_invalid_cached_file_id_rebuild(service_harness) -> None:
-    query = "найти after dark"
+    query = "\u043d\u0430\u0439\u0442\u0438 after dark"
     await service_harness.process_message_service.handle_message(
         IncomingMessage(chat_id=1, user_id=502, message_id=3, chat_type="private", text=query)
     )
@@ -29,20 +29,20 @@ async def test_music_invalid_cached_file_id_rebuild(service_harness) -> None:
     refreshed = await service_harness.cache_service.get_entry("music:ytm:after dark")
     assert refreshed is not None
     assert refreshed.audio_file_id != old_file_id
-    assert service_harness.audio_downloader.download_calls["after_dark"] == 2
+    assert service_harness.remote_downloader.download_calls["after_dark"] == 2
 
 
 async def test_music_thumbnail_is_optional(service_harness) -> None:
     service_harness.audio_downloader.fail_thumbnail_ids.add("after_dark")
     await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=503, message_id=5, chat_type="private", text="найти after dark")
+        IncomingMessage(chat_id=1, user_id=503, message_id=5, chat_type="private", text="\u043d\u0430\u0439\u0442\u0438 after dark")
     )
     assert service_harness.gateway.audio_sends[-1].has_thumbnail is False
 
 
 async def test_music_audio_send_metadata_and_filename(service_harness) -> None:
     await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=504, message_id=6, chat_type="private", text="найти after dark")
+        IncomingMessage(chat_id=1, user_id=504, message_id=6, chat_type="private", text="\u043d\u0430\u0439\u0442\u0438 after dark")
     )
     audio_send = service_harness.gateway.audio_sends[-1]
     assert audio_send.title == "After Dark"
@@ -50,23 +50,24 @@ async def test_music_audio_send_metadata_and_filename(service_harness) -> None:
     assert audio_send.file_name == "Test Artist - After Dark.mp3"
 
 
-async def test_music_strategy_fallback_uses_no_cookie_download_after_cookie_failure(service_harness) -> None:
-    query = "найти fallback anthem"
-    service_harness.audio_downloader.cookies_fail_download_ids.add("fallback_anthem")
+async def test_music_strategy_fallback_uses_youtube_direct_when_remote_provider_fails(service_harness) -> None:
+    query = "\u043d\u0430\u0439\u0442\u0438 fallback anthem"
+    service_harness.remote_downloader.fail_download_ids.add("fallback_anthem")
 
     await service_harness.process_message_service.handle_message(
         IncomingMessage(chat_id=1, user_id=505, message_id=7, chat_type="private", text=query)
     )
 
-    assert service_harness.audio_downloader.download_attempts == [
-        ("fallback_anthem", True),
-        ("fallback_anthem", False),
-    ]
+    assert service_harness.remote_downloader.download_attempts == ["fallback_anthem"]
+    assert service_harness.audio_downloader.download_attempts == [("fallback_anthem", True)]
     assert service_harness.gateway.audio_sends[-1].title == "Fallback Anthem"
+    cache_entry = await service_harness.cache_service.get_entry("music:ytm:fallback anthem")
+    assert cache_entry is not None
+    assert cache_entry.acquisition_backend == "youtube_cookies"
 
 
 async def test_music_pipeline_tries_next_candidate_when_first_candidate_fails(service_harness) -> None:
-    query = "найти complex fallback"
+    query = "\u043d\u0430\u0439\u0442\u0438 complex fallback"
     service_harness.music_provider.results["complex fallback"] = [
         MusicTrack(
             source_id="first_candidate",
@@ -93,6 +94,7 @@ async def test_music_pipeline_tries_next_candidate_when_first_candidate_fails(se
             ranking=2,
         ),
     ]
+    service_harness.remote_downloader.fail_download_ids.add("first_candidate")
     service_harness.audio_downloader.fail_download_ids.add("first_candidate")
 
     await service_harness.process_message_service.handle_message(
@@ -100,8 +102,14 @@ async def test_music_pipeline_tries_next_candidate_when_first_candidate_fails(se
     )
 
     assert service_harness.gateway.audio_sends[-1].title == "Second Candidate"
-    assert [attempt[0] for attempt in service_harness.audio_downloader.download_attempts] == [
-        "first_candidate",
-        "first_candidate",
-        "second_candidate",
-    ]
+    assert service_harness.remote_downloader.download_attempts == ["first_candidate", "second_candidate"]
+
+
+async def test_music_cache_persists_primary_acquisition_backend(service_harness) -> None:
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=507, message_id=9, chat_type="private", text="\u043d\u0430\u0439\u0442\u0438 after dark")
+    )
+
+    cache_entry = await service_harness.cache_service.get_entry("music:ytm:after dark")
+    assert cache_entry is not None
+    assert cache_entry.acquisition_backend == "remote_http"

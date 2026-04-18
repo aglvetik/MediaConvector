@@ -36,6 +36,7 @@ class CacheEntry:
     thumbnail_url: str | None = None
     has_thumbnail: bool = False
     file_name: str | None = None
+    acquisition_backend: str | None = None
 
     @property
     def is_ready_for_video(self) -> bool:

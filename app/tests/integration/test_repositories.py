@@ -45,11 +45,13 @@ async def test_repository_roundtrip(database) -> None:
             created_at=None,
             updated_at=None,
             last_hit_at=None,
+            acquisition_backend="remote_http",
         )
     )
     fetched = await cache_repo.get_by_normalized_key("tiktok:video:1")
     assert fetched is not None
     assert fetched.video_file_id == "vid1"
+    assert fetched.acquisition_backend == "remote_http"
     await cache_repo.increment_hit("tiktok:video:1")
     fetched = await cache_repo.get_by_normalized_key("tiktok:video:1")
     assert fetched.hit_count == 1

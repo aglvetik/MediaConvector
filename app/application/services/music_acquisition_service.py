@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
 from app import messages
+from app.domain.entities.music_download_artifact import MusicDownloadArtifact
 from app.domain.entities.music_search_query import MusicSearchQuery
 from app.domain.entities.music_track import MusicTrack
 from app.domain.enums import MusicFailureCode, is_auth_related_music_failure
 from app.domain.errors import MusicDownloadError, MusicNotFoundError
 from app.domain.interfaces.music_cookie_provider import MusicCookieProvider
-from app.domain.interfaces.music_provider import MusicSearchProvider
-from app.infrastructure.downloaders.audio_download_client import AudioDownloadClient
+from app.domain.interfaces.music_provider import MusicDownloadProvider, MusicMetadataProvider, MusicSearchProvider
 from app.infrastructure.logging import get_logger, log_event
 
 
@@ -33,7 +34,7 @@ class MusicAcquisitionResult:
     attempts: tuple[MusicAcquisitionFailure, ...]
 
 
-class MusicAcquisitionStrategy(Protocol):
+class MusicResolverStrategy(Protocol):
     name: str
 
     async def skip_reason(self) -> str | None:
@@ -42,34 +43,44 @@ class MusicAcquisitionStrategy(Protocol):
     async def resolve_candidates(self, query: MusicSearchQuery, *, max_candidates: int) -> list[MusicTrack]:
         ...
 
-    async def acquire(self, candidate: MusicTrack, work_dir: Path) -> Path:
+
+class MusicDownloadStrategy(Protocol):
+    name: str
+
+    async def skip_reason(self) -> str | None:
+        ...
+
+    async def acquire(self, query: MusicSearchQuery, candidate: MusicTrack, work_dir: Path) -> MusicDownloadArtifact:
         ...
 
 
-class YoutubeAcquisitionStrategy:
+SkipProbe = Callable[[], Awaitable[str | None]]
+
+
+class MusicProviderResolverStrategy:
     def __init__(
         self,
         *,
         name: str,
         provider: MusicSearchProvider,
-        downloader: AudioDownloadClient,
         cookie_provider: MusicCookieProvider | None = None,
         respect_health_state: bool = True,
+        skip_probe: SkipProbe | None = None,
     ) -> None:
         self.name = name
         self._provider = provider
-        self._downloader = downloader
         self._cookie_provider = cookie_provider
         self._respect_health_state = respect_health_state
+        self._skip_probe = skip_probe
         self._logger = get_logger(__name__)
 
     async def skip_reason(self) -> str | None:
-        if self._cookie_provider is None or not self._respect_health_state:
+        state_reason = await self._cookie_skip_reason()
+        if state_reason is not None:
+            return state_reason
+        if self._skip_probe is None:
             return None
-        state = await self._cookie_provider.current_state()
-        if state.is_degraded():
-            return f"degraded:{state.status.value}"
-        return None
+        return await self._skip_probe()
 
     async def resolve_candidates(self, query: MusicSearchQuery, *, max_candidates: int) -> list[MusicTrack]:
         cookies_file = await self._resolve_cookie_file()
@@ -90,31 +101,13 @@ class YoutubeAcquisitionStrategy:
         await self._mark_success()
         return candidates
 
-    async def acquire(self, candidate: MusicTrack, work_dir: Path) -> Path:
-        cookies_file = await self._resolve_cookie_file()
-        if self._cookie_provider is not None and cookies_file is None:
-            raise MusicDownloadError(
-                "Music cookies file is unavailable for download step.",
-                error_code=MusicFailureCode.COOKIES_MISSING.value,
-                user_message=messages.MUSIC_SOURCE_DEGRADED,
-            )
-        try:
-            output_path = await self._downloader.download_audio_source(
-                candidate,
-                work_dir,
-                cookies_file=cookies_file,
-            )
-        except MusicDownloadError as exc:
-            raise await self._translate_failure(exc) from exc
-        await self._mark_success()
-        return output_path
-
-    async def download_thumbnail(self, thumbnail_url: str, work_dir: Path, *, fallback_stem: str) -> Path | None:
-        return await self._downloader.download_thumbnail(
-            thumbnail_url,
-            work_dir,
-            fallback_stem=fallback_stem,
-        )
+    async def _cookie_skip_reason(self) -> str | None:
+        if self._cookie_provider is None or not self._respect_health_state:
+            return None
+        state = await self._cookie_provider.current_state()
+        if state.is_degraded():
+            return f"degraded:{state.status.value}"
+        return None
 
     async def _resolve_cookie_file(self) -> Path | None:
         if self._cookie_provider is None:
@@ -129,7 +122,6 @@ class YoutubeAcquisitionStrategy:
     async def _translate_failure(self, exc: MusicDownloadError) -> MusicDownloadError:
         if self._cookie_provider is None:
             return exc
-
         translated = exc
         if exc.error_code in {
             MusicFailureCode.LOGIN_REQUIRED.value,
@@ -141,7 +133,6 @@ class YoutubeAcquisitionStrategy:
                 user_message=messages.MUSIC_SOURCE_DEGRADED,
                 context={**exc.context, "original_error_code": exc.error_code},
             )
-
         await self._cookie_provider.mark_failure(
             translated.error_code,
             error_message=str(exc),
@@ -152,6 +143,99 @@ class YoutubeAcquisitionStrategy:
             "music_strategy_failure_recorded",
             strategy_name=self.name,
             error_code=translated.error_code,
+            stage="resolver",
+        )
+        return translated
+
+
+class MusicProviderDownloadStrategy:
+    def __init__(
+        self,
+        *,
+        name: str,
+        provider: MusicDownloadProvider,
+        cookie_provider: MusicCookieProvider | None = None,
+        respect_health_state: bool = True,
+        skip_probe: SkipProbe | None = None,
+    ) -> None:
+        self.name = name
+        self._provider = provider
+        self._cookie_provider = cookie_provider
+        self._respect_health_state = respect_health_state
+        self._skip_probe = skip_probe
+        self._logger = get_logger(__name__)
+
+    async def skip_reason(self) -> str | None:
+        state_reason = await self._cookie_skip_reason()
+        if state_reason is not None:
+            return state_reason
+        if self._skip_probe is None:
+            return None
+        return await self._skip_probe()
+
+    async def acquire(self, query: MusicSearchQuery, candidate: MusicTrack, work_dir: Path) -> MusicDownloadArtifact:
+        cookies_file = await self._resolve_cookie_file()
+        if self._cookie_provider is not None and cookies_file is None:
+            raise MusicDownloadError(
+                "Music cookies file is unavailable for download step.",
+                error_code=MusicFailureCode.COOKIES_MISSING.value,
+                user_message=messages.MUSIC_SOURCE_DEGRADED,
+            )
+        try:
+            artifact = await self._provider.download_track_audio(
+                query,
+                candidate,
+                work_dir,
+                cookies_file=cookies_file,
+            )
+        except MusicDownloadError as exc:
+            raise await self._translate_failure(exc) from exc
+        await self._mark_success()
+        return artifact
+
+    async def _cookie_skip_reason(self) -> str | None:
+        if self._cookie_provider is None or not self._respect_health_state:
+            return None
+        state = await self._cookie_provider.current_state()
+        if state.is_degraded():
+            return f"degraded:{state.status.value}"
+        return None
+
+    async def _resolve_cookie_file(self) -> Path | None:
+        if self._cookie_provider is None:
+            return None
+        return await self._cookie_provider.get_cookie_file()
+
+    async def _mark_success(self) -> None:
+        if self._cookie_provider is None:
+            return
+        await self._cookie_provider.mark_success()
+
+    async def _translate_failure(self, exc: MusicDownloadError) -> MusicDownloadError:
+        if self._cookie_provider is None:
+            return exc
+        translated = exc
+        if exc.error_code in {
+            MusicFailureCode.LOGIN_REQUIRED.value,
+            MusicFailureCode.PO_TOKEN_REQUIRED.value,
+        }:
+            translated = MusicDownloadError(
+                str(exc),
+                error_code=MusicFailureCode.COOKIES_SUSPECT.value,
+                user_message=messages.MUSIC_SOURCE_DEGRADED,
+                context={**exc.context, "original_error_code": exc.error_code},
+            )
+        await self._cookie_provider.mark_failure(
+            translated.error_code,
+            error_message=str(exc),
+        )
+        log_event(
+            self._logger,
+            logging.WARNING,
+            "music_strategy_failure_recorded",
+            strategy_name=self.name,
+            error_code=translated.error_code,
+            stage="download",
         )
         return translated
 
@@ -160,31 +244,39 @@ class MusicAcquisitionService:
     def __init__(
         self,
         *,
-        strategies: tuple[MusicAcquisitionStrategy, ...],
+        resolver_strategies: tuple[MusicResolverStrategy, ...],
+        download_strategies: tuple[MusicDownloadStrategy, ...],
+        metadata_provider: MusicMetadataProvider | None,
         max_candidates: int,
     ) -> None:
-        self._strategies = strategies
+        self._resolver_strategies = resolver_strategies
+        self._download_strategies = download_strategies
+        self._metadata_provider = metadata_provider
         self._max_candidates = max_candidates
         self._logger = get_logger(__name__)
 
     async def download_thumbnail(self, thumbnail_url: str, work_dir: Path, *, fallback_stem: str) -> Path | None:
-        primary_strategy = self._strategies[0]
-        if isinstance(primary_strategy, YoutubeAcquisitionStrategy):
-            return await primary_strategy.download_thumbnail(
-                thumbnail_url,
-                work_dir,
-                fallback_stem=fallback_stem,
-            )
-        return None
+        if self._metadata_provider is None:
+            return None
+        return await self._metadata_provider.download_thumbnail(
+            thumbnail_url,
+            work_dir,
+            fallback_stem=fallback_stem,
+        )
 
     async def acquire(self, query: MusicSearchQuery, work_dir: Path) -> MusicAcquisitionResult:
         failures: list[MusicAcquisitionFailure] = []
-        blocked_strategies: set[str] = set()
-        candidates = await self._resolve_candidates(query, failures=failures, blocked_strategies=blocked_strategies)
+        blocked_resolver_strategies: set[str] = set()
+        blocked_download_strategies: set[str] = set()
+        candidates = await self._resolve_candidates(
+            query,
+            failures=failures,
+            blocked_resolver_strategies=blocked_resolver_strategies,
+        )
 
         for candidate in candidates:
-            for strategy in self._strategies:
-                if strategy.name in blocked_strategies:
+            for strategy in self._download_strategies:
+                if strategy.name in blocked_download_strategies:
                     continue
 
                 skip_reason = await strategy.skip_reason()
@@ -193,7 +285,7 @@ class MusicAcquisitionService:
                         MusicAcquisitionFailure(
                             strategy_name=strategy.name,
                             stage="download",
-                            error_code=MusicFailureCode.COOKIES_SUSPECT.value,
+                            error_code=_skip_reason_error_code(skip_reason),
                             source_id=candidate.source_id,
                             message=skip_reason,
                         )
@@ -211,7 +303,7 @@ class MusicAcquisitionService:
                     continue
 
                 try:
-                    source_audio_path = await strategy.acquire(candidate, work_dir)
+                    artifact = await strategy.acquire(query, candidate, work_dir)
                 except MusicDownloadError as exc:
                     failures.append(
                         MusicAcquisitionFailure(
@@ -223,7 +315,7 @@ class MusicAcquisitionService:
                         )
                     )
                     if is_auth_related_music_failure(exc.error_code):
-                        blocked_strategies.add(strategy.name)
+                        blocked_download_strategies.add(strategy.name)
                     log_event(
                         self._logger,
                         logging.WARNING,
@@ -235,18 +327,19 @@ class MusicAcquisitionService:
                     )
                     continue
 
+                resolved_track = artifact.apply_to_track(candidate)
                 log_event(
                     self._logger,
                     logging.INFO,
                     "music_acquisition_succeeded",
                     strategy_name=strategy.name,
                     normalized_key=query.normalized_resource.normalized_key,
-                    source_id=candidate.source_id,
+                    source_id=resolved_track.source_id,
                     attempts=len(failures),
                 )
                 return MusicAcquisitionResult(
-                    track=candidate,
-                    source_audio_path=source_audio_path,
+                    track=resolved_track,
+                    source_audio_path=artifact.source_audio_path,
                     strategy_name=strategy.name,
                     attempts=tuple(failures),
                 )
@@ -258,10 +351,10 @@ class MusicAcquisitionService:
         query: MusicSearchQuery,
         *,
         failures: list[MusicAcquisitionFailure],
-        blocked_strategies: set[str],
+        blocked_resolver_strategies: set[str],
     ) -> list[MusicTrack]:
-        for strategy in self._strategies:
-            if strategy.name in blocked_strategies:
+        for strategy in self._resolver_strategies:
+            if strategy.name in blocked_resolver_strategies:
                 continue
 
             skip_reason = await strategy.skip_reason()
@@ -270,7 +363,7 @@ class MusicAcquisitionService:
                     MusicAcquisitionFailure(
                         strategy_name=strategy.name,
                         stage="resolver",
-                        error_code=MusicFailureCode.COOKIES_SUSPECT.value,
+                        error_code=_skip_reason_error_code(skip_reason),
                         message=skip_reason,
                     )
                 )
@@ -297,7 +390,7 @@ class MusicAcquisitionService:
                     )
                 )
                 if is_auth_related_music_failure(exc.error_code):
-                    blocked_strategies.add(strategy.name)
+                    blocked_resolver_strategies.add(strategy.name)
                 log_event(
                     self._logger,
                     logging.WARNING,
@@ -348,3 +441,9 @@ class MusicAcquisitionService:
                 "attempts": [asdict(failure) for failure in failures],
             },
         )
+
+
+def _skip_reason_error_code(skip_reason: str) -> str:
+    if skip_reason.startswith("degraded:"):
+        return MusicFailureCode.COOKIES_SUSPECT.value
+    return MusicFailureCode.SOURCE_UNAVAILABLE.value

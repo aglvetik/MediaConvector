@@ -8,7 +8,8 @@ from app.application.services.music_acquisition_service import (
     MusicAcquisitionFailure,
     MusicAcquisitionResult,
     MusicAcquisitionService,
-    YoutubeAcquisitionStrategy,
+    MusicProviderDownloadStrategy,
+    MusicProviderResolverStrategy,
 )
 from app.application.services.music_pipeline_service import MusicPipelineService
 from app.application.services.music_search_service import MusicSearchService
@@ -29,13 +30,14 @@ __all__ = [
     "MusicAcquisitionFailure",
     "MusicAcquisitionResult",
     "MusicAcquisitionService",
+    "MusicProviderDownloadStrategy",
+    "MusicProviderResolverStrategy",
     "MusicPipelineService",
     "MusicSearchService",
     "MusicSourceHealthPolicy",
     "MusicSourceHealthService",
     "ProcessMessageService",
     "RateLimitService",
-    "YoutubeAcquisitionStrategy",
     "UserRequestDecision",
     "UserRequestGuardService",
 ]

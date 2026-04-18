@@ -19,6 +19,9 @@ def test_settings_load_with_minimal_required_env(monkeypatch, tmp_path) -> None:
     assert settings.music_search_timeout_seconds == 15
     assert settings.music_resolver_max_candidates == 3
     assert settings.music_strategy_order_list == ("youtube_cookies", "youtube_no_cookies")
+    assert settings.music_resolver_order_list == ("youtube_cookies", "youtube_no_cookies")
+    assert settings.music_download_provider_order_list == ("remote_http", "youtube_cookies", "youtube_no_cookies")
+    assert settings.music_remote_provider_url is None
     assert settings.youtube_auth_fail_threshold == 2
     assert settings.youtube_degrade_ttl_minutes == 30
     assert settings.music_audio_only is True

@@ -36,6 +36,7 @@ class MediaCacheModel(Base):
     thumbnail_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     has_thumbnail: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     file_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    acquisition_backend: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class RequestLogModel(Base):

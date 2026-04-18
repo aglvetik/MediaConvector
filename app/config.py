@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     music_search_timeout_seconds: int = Field(default=15, alias="MUSIC_SEARCH_TIMEOUT_SECONDS")
     music_resolver_max_candidates: int = Field(default=3, alias="MUSIC_RESOLVER_MAX_CANDIDATES")
     music_strategy_order: str = Field(default="youtube_cookies,youtube_no_cookies", alias="MUSIC_STRATEGY_ORDER")
+    music_resolver_order: str | None = Field(default=None, alias="MUSIC_RESOLVER_ORDER")
+    music_download_provider_order: str = Field(
+        default="remote_http,youtube_cookies,youtube_no_cookies",
+        alias="MUSIC_DOWNLOAD_PROVIDER_ORDER",
+    )
+    music_remote_provider_url: str | None = Field(default=None, alias="MUSIC_REMOTE_PROVIDER_URL")
+    music_remote_provider_token: str | None = Field(default=None, alias="MUSIC_REMOTE_PROVIDER_TOKEN")
+    music_remote_provider_timeout_seconds: int = Field(default=30, alias="MUSIC_REMOTE_PROVIDER_TIMEOUT_SECONDS")
     youtube_auth_fail_threshold: int = Field(default=2, alias="YOUTUBE_AUTH_FAIL_THRESHOLD")
     youtube_degrade_ttl_minutes: int = Field(default=30, alias="YOUTUBE_DEGRADE_TTL_MINUTES")
     music_audio_only: bool = Field(default=True, alias="MUSIC_AUDIO_ONLY")
@@ -55,6 +63,7 @@ class Settings(BaseSettings):
         "max_music_query_length",
         "music_search_timeout_seconds",
         "music_resolver_max_candidates",
+        "music_remote_provider_timeout_seconds",
         "youtube_auth_fail_threshold",
     )
     @classmethod
@@ -79,6 +88,20 @@ class Settings(BaseSettings):
     @field_validator("ytdlp_cookies_file", mode="before")
     @classmethod
     def _empty_cookie_path_to_none(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator(
+        "music_resolver_order",
+        "music_remote_provider_url",
+        "music_remote_provider_token",
+        mode="before",
+    )
+    @classmethod
+    def _empty_string_to_none(cls, value: Any) -> Any:
         if value is None:
             return None
         if isinstance(value, str) and not value.strip():
@@ -113,14 +136,19 @@ class Settings(BaseSettings):
 
     @property
     def music_strategy_order_list(self) -> tuple[str, ...]:
-        values = tuple(
-            part.strip().lower()
-            for part in self.music_strategy_order.split(",")
-            if part.strip()
+        return self._parse_csv_order(self.music_strategy_order, default=("youtube_cookies", "youtube_no_cookies"))
+
+    @property
+    def music_resolver_order_list(self) -> tuple[str, ...]:
+        source = self.music_resolver_order or self.music_strategy_order
+        return self._parse_csv_order(source, default=("youtube_cookies", "youtube_no_cookies"))
+
+    @property
+    def music_download_provider_order_list(self) -> tuple[str, ...]:
+        return self._parse_csv_order(
+            self.music_download_provider_order,
+            default=("remote_http", "youtube_cookies", "youtube_no_cookies"),
         )
-        if values:
-            return values
-        return ("youtube_cookies", "youtube_no_cookies")
 
     @property
     def resolved_ytdlp_cookies_file(self) -> Path | None:
@@ -130,6 +158,19 @@ class Settings(BaseSettings):
         if not cookies_path.is_absolute():
             cookies_path = _PROJECT_ROOT / cookies_path
         return cookies_path.resolve(strict=False)
+
+    @staticmethod
+    def _parse_csv_order(value: str | None, *, default: tuple[str, ...]) -> tuple[str, ...]:
+        if value is None:
+            return default
+        values = tuple(
+            part.strip().lower()
+            for part in value.split(",")
+            if part.strip()
+        )
+        if values:
+            return values
+        return default
 
 
 def load_settings() -> Settings:

@@ -109,6 +109,7 @@ class CacheService:
         audio_receipt: DeliveryReceipt | None,
         file_name: str,
         has_thumbnail: bool,
+        acquisition_backend: str,
         previous_entry: CacheEntry | None = None,
     ) -> CacheEntry:
         entry = CacheEntry(
@@ -139,6 +140,7 @@ class CacheService:
             thumbnail_url=track.thumbnail_url,
             has_thumbnail=has_thumbnail,
             file_name=file_name,
+            acquisition_backend=acquisition_backend,
         )
         saved = await self._repository.save_result(entry)
         log_event(
@@ -213,6 +215,7 @@ class CacheService:
             thumbnail_url=previous_entry.thumbnail_url if previous_entry else None,
             has_thumbnail=previous_entry.has_thumbnail if previous_entry else False,
             file_name=previous_entry.file_name if previous_entry else None,
+            acquisition_backend=previous_entry.acquisition_backend if previous_entry else None,
         )
         return await self._repository.save_result(entry)
 
@@ -251,6 +254,7 @@ class CacheService:
             thumbnail_url=previous_entry.thumbnail_url if previous_entry else None,
             has_thumbnail=previous_entry.has_thumbnail if previous_entry else False,
             file_name=previous_entry.file_name if previous_entry else None,
+            acquisition_backend=previous_entry.acquisition_backend if previous_entry else None,
         )
         return await self._repository.save_result(entry)
 

@@ -1,5 +1,5 @@
 from app.domain.interfaces.music_cookie_provider import MusicCookieProvider
-from app.domain.interfaces.music_provider import MusicSearchProvider
+from app.domain.interfaces.music_provider import MusicDownloadProvider, MusicMetadataProvider, MusicSearchProvider
 from app.domain.interfaces.provider import DownloaderProvider
 from app.domain.interfaces.repositories import (
     CacheRepository,
@@ -15,6 +15,8 @@ __all__ = [
     "DownloadJobRepository",
     "DownloaderProvider",
     "MusicCookieProvider",
+    "MusicDownloadProvider",
+    "MusicMetadataProvider",
     "MusicSearchProvider",
     "MusicSourceStateRepository",
     "ProcessedMessageRepository",

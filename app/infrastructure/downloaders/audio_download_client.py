@@ -8,12 +8,14 @@ from typing import Any
 import httpx
 import yt_dlp
 
+from app.domain.entities.music_download_artifact import MusicDownloadArtifact
+from app.domain.entities.music_search_query import MusicSearchQuery
 from app.domain.entities.music_track import MusicTrack
 from app.domain.errors import MusicDownloadError
 from app.domain.enums import MusicFailureCode
 from app.infrastructure.downloaders.ytdlp_music_error_parser import classify_ytdlp_music_error
-from app.infrastructure.logging import get_logger, log_event
 from app.infrastructure.downloaders.ytdlp_music_options import build_music_ytdlp_options
+from app.infrastructure.logging import get_logger, log_event
 
 
 class AudioDownloadClient:
@@ -60,6 +62,28 @@ class AudioDownloadClient:
                 file_path=str(downloaded_path),
             )
             return downloaded_path
+
+    async def download_track_audio(
+        self,
+        query: MusicSearchQuery,
+        candidate: MusicTrack,
+        work_dir: Path,
+        *,
+        cookies_file: Path | None = None,
+    ) -> MusicDownloadArtifact:
+        del query
+        source_path = await self.download_audio_source(
+            candidate,
+            work_dir,
+            cookies_file=cookies_file,
+        )
+        return MusicDownloadArtifact(
+            source_audio_path=source_path,
+            provider_name="youtube_direct",
+            canonical_url=candidate.canonical_url,
+            source_id=candidate.source_id,
+            source_name=candidate.source_name,
+        )
 
     async def download_thumbnail(self, thumbnail_url: str, work_dir: Path, *, fallback_stem: str) -> Path | None:
         output_path = work_dir / f"{fallback_stem}-thumb"

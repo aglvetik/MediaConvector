@@ -171,7 +171,7 @@ async def test_music_cache_hit_flow(service_harness) -> None:
         IncomingMessage(chat_id=1, user_id=402, message_id=19, chat_type="private", text=query)
     )
     assert service_harness.music_provider.search_calls["in the end slowed"] == 1
-    assert service_harness.audio_downloader.download_calls["in_the_end_slowed"] == 1
+    assert service_harness.remote_downloader.download_calls["in_the_end_slowed"] == 1
     assert len(service_harness.gateway.sent_audio_receipts) == 2
 
 
@@ -225,7 +225,7 @@ async def test_music_invalid_cached_audio_file_id_flow(service_harness) -> None:
     refreshed = await service_harness.cache_service.get_entry("music:ytm:summertime sadness")
     assert refreshed is not None
     assert refreshed.audio_file_id != old_audio_file_id
-    assert service_harness.audio_downloader.download_calls["summertime_sadness"] == 2
+    assert service_harness.remote_downloader.download_calls["summertime_sadness"] == 2
 
 
 async def test_music_thumbnail_failure_is_optional(service_harness) -> None:

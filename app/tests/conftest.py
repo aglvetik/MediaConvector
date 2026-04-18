@@ -12,13 +12,14 @@ from app.application.services import (
     InFlightDedupService,
     MediaPipelineService,
     MetricsService,
+    MusicProviderDownloadStrategy,
+    MusicProviderResolverStrategy,
     MusicAcquisitionService,
     MusicPipelineService,
     MusicSearchService,
     MusicSourceHealthService,
     ProcessMessageService,
     RateLimitService,
-    YoutubeAcquisitionStrategy,
     UserRequestGuardService,
 )
 from app.infrastructure.providers.music.static_cookie_file_provider import StaticCookieFileProvider
@@ -32,7 +33,14 @@ from app.infrastructure.persistence.sqlite import (
 )
 from app.infrastructure.persistence.sqlite.base import Base
 from app.infrastructure.temp import TempFileManager
-from app.tests.fakes import FakeAudioDownloadClient, FakeFfmpegAdapter, FakeGateway, FakeMusicProvider, FakeProvider
+from app.tests.fakes import (
+    FakeAudioDownloadClient,
+    FakeFfmpegAdapter,
+    FakeGateway,
+    FakeMusicProvider,
+    FakeProvider,
+    FakeRemoteMusicDownloadProvider,
+)
 
 
 @pytest_asyncio.fixture
@@ -55,6 +63,7 @@ class ServiceHarness:
     gateway: FakeGateway
     provider: FakeProvider
     music_provider: FakeMusicProvider
+    remote_downloader: FakeRemoteMusicDownloadProvider
     audio_downloader: FakeAudioDownloadClient
     ffmpeg: FakeFfmpegAdapter
     temp_manager: TempFileManager
@@ -75,6 +84,7 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
     gateway = FakeGateway()
     provider = FakeProvider()
     music_provider = FakeMusicProvider()
+    remote_downloader = FakeRemoteMusicDownloadProvider()
     audio_downloader = FakeAudioDownloadClient(audio_only=True)
     ffmpeg = FakeFfmpegAdapter()
     metrics = MetricsService()
@@ -105,22 +115,42 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
         health_service=music_source_health_service,
     )
     music_acquisition_service = MusicAcquisitionService(
-        strategies=(
-            YoutubeAcquisitionStrategy(
+        resolver_strategies=(
+            MusicProviderResolverStrategy(
                 name="youtube_cookies",
                 provider=music_provider,
-                downloader=audio_downloader,
                 cookie_provider=cookie_provider,
                 respect_health_state=True,
             ),
-            YoutubeAcquisitionStrategy(
+            MusicProviderResolverStrategy(
                 name="youtube_no_cookies",
                 provider=music_provider,
-                downloader=audio_downloader,
                 cookie_provider=None,
                 respect_health_state=False,
             ),
         ),
+        download_strategies=(
+            MusicProviderDownloadStrategy(
+                name="remote_http",
+                provider=remote_downloader,
+                cookie_provider=None,
+                respect_health_state=False,
+                skip_probe=remote_downloader.skip_reason,
+            ),
+            MusicProviderDownloadStrategy(
+                name="youtube_cookies",
+                provider=audio_downloader,
+                cookie_provider=cookie_provider,
+                respect_health_state=True,
+            ),
+            MusicProviderDownloadStrategy(
+                name="youtube_no_cookies",
+                provider=audio_downloader,
+                cookie_provider=None,
+                respect_health_state=False,
+            ),
+        ),
+        metadata_provider=audio_downloader,
         max_candidates=3,
     )
     music_pipeline_service = MusicPipelineService(
@@ -153,6 +183,7 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
         gateway=gateway,
         provider=provider,
         music_provider=music_provider,
+        remote_downloader=remote_downloader,
         audio_downloader=audio_downloader,
         ffmpeg=ffmpeg,
         temp_manager=temp_manager,

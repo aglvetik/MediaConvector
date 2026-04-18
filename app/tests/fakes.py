@@ -4,6 +4,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.domain.entities.music_download_artifact import MusicDownloadArtifact
+from app.domain.entities.music_search_query import MusicSearchQuery
 from app.domain.entities.media_result import DeliveryReceipt, MediaMetadata
 from app.domain.entities.music_track import MusicTrack
 from app.domain.entities.normalized_resource import NormalizedResource
@@ -158,6 +160,28 @@ class FakeAudioDownloadClient:
         path.write_bytes(b"music-source-bytes")
         return path
 
+    async def download_track_audio(
+        self,
+        query: MusicSearchQuery,
+        candidate: MusicTrack,
+        work_dir: Path,
+        *,
+        cookies_file: Path | None = None,
+    ) -> MusicDownloadArtifact:
+        del query
+        source_path = await self.download_audio_source(
+            candidate,
+            work_dir,
+            cookies_file=cookies_file,
+        )
+        return MusicDownloadArtifact(
+            source_audio_path=source_path,
+            provider_name="youtube_direct",
+            canonical_url=candidate.canonical_url,
+            source_id=candidate.source_id,
+            source_name=candidate.source_name,
+        )
+
     async def download_thumbnail(self, thumbnail_url: str, work_dir: Path, *, fallback_stem: str) -> Path | None:
         self.thumbnail_calls[fallback_stem] += 1
         if fallback_stem in self.fail_thumbnail_ids:
@@ -165,6 +189,48 @@ class FakeAudioDownloadClient:
         path = work_dir / f"{fallback_stem}-thumb.jpg"
         path.write_bytes(b"thumbnail-bytes")
         return path
+
+
+class FakeRemoteMusicDownloadProvider:
+    provider_name = "remote_http"
+
+    def __init__(self) -> None:
+        self.configured = True
+        self.download_calls: dict[str, int] = defaultdict(int)
+        self.download_attempts: list[str] = []
+        self.fail_download_ids: set[str] = set()
+
+    async def skip_reason(self) -> str | None:
+        if self.configured:
+            return None
+        return "provider_not_configured"
+
+    async def download_track_audio(
+        self,
+        query: MusicSearchQuery,
+        candidate: MusicTrack,
+        work_dir: Path,
+        *,
+        cookies_file: Path | None = None,
+    ) -> MusicDownloadArtifact:
+        del query
+        del cookies_file
+        self.download_calls[candidate.source_id] += 1
+        self.download_attempts.append(candidate.source_id)
+        if candidate.source_id in self.fail_download_ids:
+            raise MusicDownloadError(
+                "remote download failed",
+                error_code=MusicFailureCode.SOURCE_UNAVAILABLE.value,
+            )
+        path = work_dir / f"remote-{candidate.source_id}.mp3"
+        path.write_bytes(b"remote-music-source-bytes")
+        return MusicDownloadArtifact(
+            source_audio_path=path,
+            provider_name=self.provider_name,
+            canonical_url=f"https://audio.example/{candidate.source_id}",
+            source_id=candidate.source_id,
+            source_name=self.provider_name,
+        )
 
 
 class FakeFfmpegAdapter:

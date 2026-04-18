@@ -14,13 +14,14 @@ from app.application.services import (
     InFlightDedupService,
     MediaPipelineService,
     MetricsService,
+    MusicProviderDownloadStrategy,
+    MusicProviderResolverStrategy,
     MusicAcquisitionService,
     MusicPipelineService,
     MusicSearchService,
     MusicSourceHealthService,
     ProcessMessageService,
     RateLimitService,
-    YoutubeAcquisitionStrategy,
     UserRequestGuardService,
 )
 from app.config import Settings
@@ -34,7 +35,13 @@ from app.infrastructure.persistence.sqlite import (
     SqlAlchemyProcessedMessageRepository,
     SqlAlchemyRequestLogRepository,
 )
-from app.infrastructure.providers import StaticCookieFileProvider, TikTokProvider, YouTubeMusicProvider
+from app.infrastructure.providers import (
+    HttpMusicMetadataProvider,
+    RemoteMusicDownloadProvider,
+    StaticCookieFileProvider,
+    TikTokProvider,
+    YouTubeMusicProvider,
+)
 from app.infrastructure.telegram import AiogramTelegramGateway
 from app.infrastructure.temp import TempFileManager
 from app.infrastructure.logging import get_logger, log_event
@@ -71,6 +78,9 @@ def build_container(settings: Settings) -> AppContainer:
             "cookies_exists": bool(cookies_file and os.path.exists(cookies_file)),
             "ffmpeg": settings.ffmpeg_path,
             "ytdlp": settings.ytdlp_path,
+            "music_remote_provider_configured": bool(settings.music_remote_provider_url),
+            "music_resolver_order": settings.music_resolver_order_list,
+            "music_download_provider_order": settings.music_download_provider_order_list,
         },
     )
     log_event(
@@ -81,6 +91,9 @@ def build_container(settings: Settings) -> AppContainer:
         cookies_exists=bool(cookies_file and os.path.exists(cookies_file)),
         ffmpeg=settings.ffmpeg_path,
         ytdlp=settings.ytdlp_path,
+        music_remote_provider_configured=bool(settings.music_remote_provider_url),
+        music_resolver_order=settings.music_resolver_order_list,
+        music_download_provider_order=settings.music_download_provider_order_list,
     )
 
     cache_repository = SqlAlchemyCacheRepository(database)
@@ -110,6 +123,13 @@ def build_container(settings: Settings) -> AppContainer:
         timeout_seconds=settings.music_search_timeout_seconds,
         semaphore=download_semaphore,
     )
+    music_metadata_provider = HttpMusicMetadataProvider(timeout_seconds=settings.request_timeout_seconds)
+    remote_music_download_provider = RemoteMusicDownloadProvider(
+        endpoint_url=settings.music_remote_provider_url,
+        access_token=settings.music_remote_provider_token,
+        timeout_seconds=settings.music_remote_provider_timeout_seconds,
+        semaphore=download_semaphore,
+    )
     audio_download_client = AudioDownloadClient(
         timeout_seconds=settings.download_timeout_seconds,
         semaphore=download_semaphore,
@@ -129,11 +149,25 @@ def build_container(settings: Settings) -> AppContainer:
         degrade_ttl_minutes=settings.youtube_degrade_ttl_minutes,
         healthcheck_enabled=settings.cookie_healthcheck_enabled,
     )
-    strategy_registry: dict[str, YoutubeAcquisitionStrategy] = {
-        "youtube_no_cookies": YoutubeAcquisitionStrategy(
+    resolver_strategy_registry: dict[str, MusicProviderResolverStrategy] = {
+        "youtube_no_cookies": MusicProviderResolverStrategy(
             name="youtube_no_cookies",
             provider=youtube_music_provider,
-            downloader=audio_download_client,
+            cookie_provider=None,
+            respect_health_state=False,
+        ),
+    }
+    download_strategy_registry: dict[str, MusicProviderDownloadStrategy] = {
+        "remote_http": MusicProviderDownloadStrategy(
+            name="remote_http",
+            provider=remote_music_download_provider,
+            cookie_provider=None,
+            respect_health_state=False,
+            skip_probe=remote_music_download_provider.skip_reason,
+        ),
+        "youtube_no_cookies": MusicProviderDownloadStrategy(
+            name="youtube_no_cookies",
+            provider=audio_download_client,
             cookie_provider=None,
             respect_health_state=False,
         ),
@@ -143,22 +177,39 @@ def build_container(settings: Settings) -> AppContainer:
             cookies_file=cookies_file,
             health_service=music_source_health_service,
         )
-        strategy_registry["youtube_cookies"] = YoutubeAcquisitionStrategy(
+        resolver_strategy_registry["youtube_cookies"] = MusicProviderResolverStrategy(
             name="youtube_cookies",
             provider=youtube_music_provider,
-            downloader=audio_download_client,
             cookie_provider=cookie_provider,
             respect_health_state=settings.cookie_healthcheck_enabled,
         )
-    ordered_music_strategies = tuple(
-        strategy_registry[name]
-        for name in settings.music_strategy_order_list
-        if name in strategy_registry
+        download_strategy_registry["youtube_cookies"] = MusicProviderDownloadStrategy(
+            name="youtube_cookies",
+            provider=audio_download_client,
+            cookie_provider=cookie_provider,
+            respect_health_state=settings.cookie_healthcheck_enabled,
+        )
+    ordered_resolver_strategies = tuple(
+        resolver_strategy_registry[name]
+        for name in settings.music_resolver_order_list
+        if name in resolver_strategy_registry
     )
-    if not ordered_music_strategies:
-        ordered_music_strategies = (strategy_registry["youtube_no_cookies"],)
+    if not ordered_resolver_strategies:
+        ordered_resolver_strategies = (resolver_strategy_registry["youtube_no_cookies"],)
+    ordered_download_strategies = tuple(
+        download_strategy_registry[name]
+        for name in settings.music_download_provider_order_list
+        if name in download_strategy_registry
+    )
+    if not ordered_download_strategies:
+        ordered_download_strategies = (
+            download_strategy_registry["remote_http"],
+            download_strategy_registry["youtube_no_cookies"],
+        )
     music_acquisition_service = MusicAcquisitionService(
-        strategies=ordered_music_strategies,
+        resolver_strategies=ordered_resolver_strategies,
+        download_strategies=ordered_download_strategies,
+        metadata_provider=music_metadata_provider,
         max_candidates=settings.music_resolver_max_candidates,
     )
     media_pipeline_service = MediaPipelineService(

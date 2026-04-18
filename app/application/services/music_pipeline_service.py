@@ -141,6 +141,7 @@ class MusicPipelineService:
                 audio_receipt=media_result.audio_receipt,
                 file_name=file_name,
                 has_thumbnail=thumbnail_path is not None,
+                acquisition_backend=acquisition.strategy_name,
             )
             await self._job_repository.update_status(job.request_id, JobStatus.COMPLETED)
             return MusicOwnerPipelineResult(media_result=media_result, cache_entry=cache_entry)

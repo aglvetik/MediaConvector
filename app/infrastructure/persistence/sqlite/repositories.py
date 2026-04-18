@@ -53,6 +53,7 @@ def _to_cache_entity(model: MediaCacheModel) -> CacheEntry:
         thumbnail_url=model.thumbnail_url,
         has_thumbnail=model.has_thumbnail,
         file_name=model.file_name,
+        acquisition_backend=model.acquisition_backend,
     )
 
 
@@ -109,6 +110,7 @@ class SqlAlchemyCacheRepository:
                 thumbnail_url=current.thumbnail_url if current else entry.thumbnail_url,
                 has_thumbnail=current.has_thumbnail if current else entry.has_thumbnail,
                 file_name=current.file_name if current else entry.file_name,
+                acquisition_backend=current.acquisition_backend if current else entry.acquisition_backend,
             )
             stmt = stmt.on_conflict_do_update(
                 index_elements=[MediaCacheModel.normalized_key],
@@ -126,6 +128,7 @@ class SqlAlchemyCacheRepository:
                     "thumbnail_url": current.thumbnail_url if current else entry.thumbnail_url,
                     "has_thumbnail": current.has_thumbnail if current else entry.has_thumbnail,
                     "file_name": current.file_name if current else entry.file_name,
+                    "acquisition_backend": current.acquisition_backend if current else entry.acquisition_backend,
                 },
             )
             await session.execute(stmt)
@@ -165,6 +168,7 @@ class SqlAlchemyCacheRepository:
                 thumbnail_url=entry.thumbnail_url,
                 has_thumbnail=entry.has_thumbnail,
                 file_name=entry.file_name,
+                acquisition_backend=entry.acquisition_backend,
             )
             stmt = stmt.on_conflict_do_update(
                 index_elements=[MediaCacheModel.normalized_key],
@@ -192,6 +196,7 @@ class SqlAlchemyCacheRepository:
                     "thumbnail_url": entry.thumbnail_url,
                     "has_thumbnail": entry.has_thumbnail,
                     "file_name": entry.file_name,
+                    "acquisition_backend": entry.acquisition_backend,
                 },
             )
             await session.execute(stmt)
