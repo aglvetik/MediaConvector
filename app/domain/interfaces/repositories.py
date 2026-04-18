@@ -50,6 +50,9 @@ class DownloadJobRepository(Protocol):
 
 
 class ProcessedMessageRepository(Protocol):
+    async def exists(self, chat_id: int, message_id: int, normalized_key: str) -> bool:
+        ...
+
     async def claim(self, chat_id: int, message_id: int, normalized_key: str) -> bool:
         ...
 

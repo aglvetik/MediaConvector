@@ -6,6 +6,9 @@ from app.domain.errors.exceptions import (
     DownloadUnavailableError,
     InvalidCachedMediaError,
     MediaTooLargeError,
+    MusicDownloadError,
+    MusicNotFoundError,
+    MusicQueryValidationError,
     NormalizationError,
     ProcessingConflictError,
     RateLimitExceededError,
@@ -21,10 +24,12 @@ __all__ = [
     "DownloadUnavailableError",
     "InvalidCachedMediaError",
     "MediaTooLargeError",
+    "MusicDownloadError",
+    "MusicNotFoundError",
+    "MusicQueryValidationError",
     "NormalizationError",
     "ProcessingConflictError",
     "RateLimitExceededError",
     "TelegramDeliveryError",
     "UnsupportedUrlError",
 ]
-

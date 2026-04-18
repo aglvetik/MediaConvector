@@ -11,7 +11,13 @@ class TelegramGateway(Protocol):
     def is_ready(self) -> bool:
         ...
 
-    async def send_loading_message(self, chat_id: int, reply_to_message_id: int | None = None) -> int:
+    async def send_loading_message(
+        self,
+        chat_id: int,
+        reply_to_message_id: int | None = None,
+        *,
+        text: str,
+    ) -> int:
         ...
 
     async def delete_message(self, chat_id: int, message_id: int) -> None:
@@ -23,11 +29,33 @@ class TelegramGateway(Protocol):
     async def send_video_by_file_id(self, chat_id: int, file_id: str, caption: str, reply_to_message_id: int | None = None) -> DeliveryReceipt:
         ...
 
-    async def send_audio_by_file_id(self, chat_id: int, file_id: str, caption: str, reply_to_message_id: int | None = None) -> DeliveryReceipt:
+    async def send_audio_by_file_id(
+        self,
+        chat_id: int,
+        file_id: str,
+        caption: str | None = None,
+        reply_to_message_id: int | None = None,
+        *,
+        title: str | None = None,
+        performer: str | None = None,
+        thumbnail_path: Path | None = None,
+        file_name: str | None = None,
+    ) -> DeliveryReceipt:
         ...
 
     async def send_video_by_upload(self, chat_id: int, file_path: Path, caption: str, reply_to_message_id: int | None = None) -> DeliveryReceipt:
         ...
 
-    async def send_audio_by_upload(self, chat_id: int, file_path: Path, caption: str, reply_to_message_id: int | None = None) -> DeliveryReceipt:
+    async def send_audio_by_upload(
+        self,
+        chat_id: int,
+        file_path: Path,
+        caption: str | None = None,
+        reply_to_message_id: int | None = None,
+        *,
+        title: str | None = None,
+        performer: str | None = None,
+        thumbnail_path: Path | None = None,
+        file_name: str | None = None,
+    ) -> DeliveryReceipt:
         ...

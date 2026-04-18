@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 from uuid import uuid4
@@ -9,9 +10,15 @@ from app import messages
 from app.application.services.delivery_service import DeliveryService
 from app.application.services.media_pipeline_service import MediaPipelineService
 from app.application.services.metrics_service import MetricsService
+from app.application.services.music_pipeline_service import MusicPipelineService
+from app.application.services.music_search_service import MusicSearchService
 from app.application.services.rate_limit_service import RateLimitService
+from app.application.services.user_request_guard_service import UserRequestGuardService
 from app.domain.entities.media_request import MediaRequest
-from app.domain.errors import AppError, ProcessingConflictError
+from app.domain.entities.media_result import MediaResult
+from app.domain.entities.normalized_resource import NormalizedResource
+from app.domain.entities.music_search_query import MusicSearchQuery
+from app.domain.errors import AppError
 from app.domain.interfaces.provider import DownloaderProvider
 from app.domain.interfaces.repositories import ProcessedMessageRepository, RequestLogRepository
 from app.infrastructure.logging import get_logger, log_event
@@ -33,7 +40,10 @@ class ProcessMessageService:
         providers: tuple[DownloaderProvider, ...],
         delivery_service: DeliveryService,
         media_pipeline_service: MediaPipelineService,
+        music_search_service: MusicSearchService,
+        music_pipeline_service: MusicPipelineService,
         rate_limit_service: RateLimitService,
+        user_request_guard_service: UserRequestGuardService,
         processed_message_repository: ProcessedMessageRepository,
         request_log_repository: RequestLogRepository,
         metrics_service: MetricsService,
@@ -41,40 +51,38 @@ class ProcessMessageService:
         self._providers = providers
         self._delivery_service = delivery_service
         self._media_pipeline_service = media_pipeline_service
+        self._music_search_service = music_search_service
+        self._music_pipeline_service = music_pipeline_service
         self._rate_limit_service = rate_limit_service
+        self._user_request_guard_service = user_request_guard_service
         self._processed_message_repository = processed_message_repository
         self._request_log_repository = request_log_repository
         self._metrics = metrics_service
         self._logger = get_logger(__name__)
 
     async def handle_message(self, incoming: IncomingMessage) -> bool:
+        request_id = uuid4().hex
+        normalized_key: str | None = None
         log_event(
             self._logger,
             logging.INFO,
             "incoming_message",
+            request_id=request_id,
             chat_id=incoming.chat_id,
             user_id=incoming.user_id,
             message_id=incoming.message_id,
             chat_type=incoming.chat_type,
         )
-        provider, detected_url = self._detect_provider(incoming.text)
-        if provider is None or detected_url is None:
-            return False
-
-        request_id = uuid4().hex
-        loading_message_id: int | None = None
-        success = False
-        delivery_status = "failed"
-        cache_hit = False
-        error_code: str | None = None
-        claimed_message = False
-        request_logged = False
-        normalized = None
-        request: MediaRequest | None = None
-
         try:
-            self._rate_limit_service.ensure_allowed(incoming.user_id)
-            self._metrics.increment("requests_total")
+            music_query = self._music_search_service.parse_message(incoming.text)
+            if music_query is not None:
+                normalized_key = music_query.normalized_resource.normalized_key
+                return await self._handle_music_message(request_id, incoming, music_query)
+
+            provider, detected_url = self._detect_provider(incoming.text)
+            if provider is None or detected_url is None:
+                return False
+
             log_event(
                 self._logger,
                 logging.INFO,
@@ -84,10 +92,96 @@ class ProcessMessageService:
                 user_id=incoming.user_id,
                 detected_url=detected_url,
             )
-
             normalized = await provider.normalize(detected_url)
+            normalized_key = normalized.normalized_key
+            return await self._execute_flow(
+                request_id=request_id,
+                incoming=incoming,
+                normalized=normalized,
+                loading_text=messages.LOADING_MESSAGE,
+                pipeline_runner=lambda request: self._media_pipeline_service.process(request, provider),
+            )
+        except AppError as exc:
+            if exc.user_message:
+                await self._safe_send_user_message(incoming.chat_id, exc.user_message, incoming.message_id)
+            log_event(
+                self._logger,
+                logging.ERROR,
+                "request_failed",
+                request_id=request_id,
+                chat_id=incoming.chat_id,
+                user_id=incoming.user_id,
+                normalized_key=normalized_key,
+                error_code=exc.error_code,
+            )
+            return True
+        except Exception:
+            await self._safe_send_user_message(incoming.chat_id, messages.UNKNOWN_ERROR, incoming.message_id)
+            log_event(
+                self._logger,
+                logging.ERROR,
+                "request_failed",
+                request_id=request_id,
+                chat_id=incoming.chat_id,
+                user_id=incoming.user_id,
+                normalized_key=normalized_key,
+                error_code="unexpected_error",
+            )
+            return True
+
+    async def _handle_music_message(self, request_id: str, incoming: IncomingMessage, music_query: MusicSearchQuery) -> bool:
+        self._metrics.increment("music_requests_total")
+        return await self._execute_flow(
+            request_id=request_id,
+            incoming=incoming,
+            normalized=music_query.normalized_resource,
+            loading_text=messages.MUSIC_LOADING_MESSAGE,
+            pipeline_runner=lambda request: self._music_pipeline_service.process(request, music_query),
+        )
+
+    async def _execute_flow(
+        self,
+        *,
+        request_id: str,
+        incoming: IncomingMessage,
+        normalized: NormalizedResource,
+        loading_text: str,
+        pipeline_runner: Callable[[MediaRequest], Awaitable[MediaResult]],
+    ) -> bool:
+        loading_message_id: int | None = None
+        success = False
+        delivery_status = "failed"
+        cache_hit = False
+        error_code: str | None = None
+        claimed_message = False
+        request_logged = False
+        user_slot_acquired = False
+
+        try:
+            if await self._processed_message_repository.exists(incoming.chat_id, incoming.message_id, normalized.normalized_key):
+                return True
+
+            user_request_decision = await self._user_request_guard_service.try_acquire(incoming.user_id)
+            if not user_request_decision.allowed:
+                log_event(
+                    self._logger,
+                    logging.INFO,
+                    "request_blocked",
+                    request_id=request_id,
+                    chat_id=incoming.chat_id,
+                    user_id=incoming.user_id,
+                    normalized_key=normalized.normalized_key,
+                    reason=user_request_decision.reason,
+                )
+                if user_request_decision.should_notify:
+                    await self._safe_send_user_message(incoming.chat_id, messages.REQUEST_COOLDOWN, incoming.message_id)
+                return True
+            user_slot_acquired = True
+
+            self._rate_limit_service.ensure_allowed(incoming.user_id)
+            self._metrics.increment("requests_total")
             if not await self._processed_message_repository.claim(incoming.chat_id, incoming.message_id, normalized.normalized_key):
-                raise ProcessingConflictError()
+                return True
             claimed_message = True
 
             await self._request_log_repository.log_started(
@@ -109,13 +203,11 @@ class ProcessMessageService:
                 message_text=incoming.text,
                 normalized_resource=normalized,
             )
-            loading_message_id = await self._delivery_service.send_loading(incoming.chat_id, incoming.message_id)
-            result = await self._media_pipeline_service.process(request, provider)
+            loading_message_id = await self._delivery_service.send_loading_text(incoming.chat_id, loading_text, incoming.message_id)
+            result = await pipeline_runner(request)
             success = result.delivery_status.value != "failed"
             delivery_status = result.delivery_status.value
             cache_hit = result.cache_hit
-            return True
-        except ProcessingConflictError:
             return True
         except AppError as exc:
             error_code = exc.error_code
@@ -128,7 +220,7 @@ class ProcessMessageService:
                 request_id=request_id,
                 chat_id=incoming.chat_id,
                 user_id=incoming.user_id,
-                normalized_key=normalized.normalized_key if normalized is not None else None,
+                normalized_key=normalized.normalized_key,
                 error_code=exc.error_code,
             )
             return True
@@ -142,7 +234,7 @@ class ProcessMessageService:
                 request_id=request_id,
                 chat_id=incoming.chat_id,
                 user_id=incoming.user_id,
-                normalized_key=normalized.normalized_key if normalized is not None else None,
+                normalized_key=normalized.normalized_key,
                 error_code=error_code,
             )
             return True
@@ -152,7 +244,7 @@ class ProcessMessageService:
                     await self._delivery_service.delete_loading(incoming.chat_id, loading_message_id)
                 except Exception:
                     pass
-            if claimed_message and normalized is not None:
+            if claimed_message:
                 try:
                     await self._processed_message_repository.mark_finished(
                         incoming.chat_id,
@@ -188,7 +280,21 @@ class ProcessMessageService:
                         request_id=request_id,
                         chat_id=incoming.chat_id,
                         user_id=incoming.user_id,
-                        normalized_key=normalized.normalized_key if normalized is not None else None,
+                        normalized_key=normalized.normalized_key,
+                        error=str(exc),
+                    )
+            if user_slot_acquired:
+                try:
+                    await self._user_request_guard_service.release(incoming.user_id)
+                except Exception as exc:
+                    log_event(
+                        self._logger,
+                        logging.ERROR,
+                        "user_slot_release_failed",
+                        request_id=request_id,
+                        chat_id=incoming.chat_id,
+                        user_id=incoming.user_id,
+                        normalized_key=normalized.normalized_key,
                         error=str(exc),
                     )
 

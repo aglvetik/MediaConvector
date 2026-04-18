@@ -44,6 +44,7 @@ async def test_repository_roundtrip(database) -> None:
     await cache_repo.increment_hit("tiktok:video:1")
     fetched = await cache_repo.get_by_normalized_key("tiktok:video:1")
     assert fetched.hit_count == 1
+    assert fetched.is_ready_for_video is True
 
     created_job = await job_repo.create(
         DownloadJob(
@@ -61,10 +62,11 @@ async def test_repository_roundtrip(database) -> None:
         )
     )
     await job_repo.update_status(created_job.request_id, JobStatus.COMPLETED)
+    assert await processed_repo.exists(1, 100, "tiktok:video:1") is False
     assert await processed_repo.claim(1, 100, "tiktok:video:1") is True
+    assert await processed_repo.exists(1, 100, "tiktok:video:1") is True
     assert await processed_repo.claim(1, 100, "tiktok:video:1") is False
     await processed_repo.mark_finished(1, 100, "tiktok:video:1", success=True)
     await request_log_repo.log_started("req-1", 1, 2, 100, "tiktok:video:1", saved.original_url)
     await request_log_repo.log_finished("req-1", success=True, delivery_status="sent_all", cache_hit=False)
     assert await request_log_repo.count_recent() == 1
-

@@ -7,6 +7,8 @@ from app.domain.entities.cache_entry import CacheEntry
 from app.domain.entities.media_request import MediaRequest
 from app.domain.entities.media_result import DeliveryReceipt, MediaResult
 from app.domain.errors import AppError, InvalidCachedMediaError
+from app.domain.enums.cache_status import CacheStatus
+from app.domain.enums.delivery_status import DeliveryStatus
 from app.domain.interfaces.telegram_gateway import TelegramGateway
 from app.domain.policies import determine_cache_status, determine_delivery_status
 from app.infrastructure.logging import get_logger, log_event
@@ -18,7 +20,10 @@ class DeliveryService:
         self._logger = get_logger(__name__)
 
     async def send_loading(self, chat_id: int, reply_to_message_id: int | None = None) -> int:
-        return await self._gateway.send_loading_message(chat_id, reply_to_message_id)
+        return await self.send_loading_text(chat_id, messages.LOADING_MESSAGE, reply_to_message_id)
+
+    async def send_loading_text(self, chat_id: int, text: str, reply_to_message_id: int | None = None) -> int:
+        return await self._gateway.send_loading_message(chat_id, reply_to_message_id, text=text)
 
     async def delete_loading(self, chat_id: int, message_id: int) -> None:
         await self._gateway.delete_message(chat_id, message_id)
@@ -306,5 +311,91 @@ class DeliveryService:
             audio_receipt=audio_receipt,
             has_audio=True,
             cache_hit=True,
+            user_notice=None,
+        )
+
+    async def deliver_music_from_cache(self, request: MediaRequest, cache_entry: CacheEntry) -> MediaResult:
+        log_event(
+            self._logger,
+            20,
+            "telegram_send_audio_started",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            cached=True,
+        )
+        audio_receipt = await self._gateway.send_audio_by_file_id(
+            request.chat_id,
+            cache_entry.audio_file_id,
+            None,
+            request.message_id,
+            title=cache_entry.title,
+            performer=cache_entry.performer,
+            file_name=cache_entry.file_name,
+        )
+        log_event(
+            self._logger,
+            20,
+            "telegram_send_audio_finished",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            cached=True,
+        )
+        return MediaResult(
+            delivery_status=DeliveryStatus.SENT_AUDIO,
+            cache_status=CacheStatus.READY,
+            video_receipt=None,
+            audio_receipt=audio_receipt,
+            has_audio=True,
+            cache_hit=True,
+            user_notice=None,
+        )
+
+    async def deliver_music_upload(
+        self,
+        request: MediaRequest,
+        audio_path: Path,
+        *,
+        title: str | None,
+        performer: str | None,
+        thumbnail_path: Path | None,
+        file_name: str | None,
+    ) -> MediaResult:
+        log_event(
+            self._logger,
+            20,
+            "telegram_send_audio_started",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            cached=False,
+        )
+        audio_receipt = await self._gateway.send_audio_by_upload(
+            request.chat_id,
+            audio_path,
+            None,
+            request.message_id,
+            title=title,
+            performer=performer,
+            thumbnail_path=thumbnail_path,
+            file_name=file_name,
+        )
+        log_event(
+            self._logger,
+            20,
+            "telegram_send_audio_finished",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            cached=False,
+        )
+        return MediaResult(
+            delivery_status=DeliveryStatus.SENT_AUDIO,
+            cache_status=CacheStatus.READY,
+            video_receipt=None,
+            audio_receipt=audio_receipt,
+            has_audio=True,
+            cache_hit=False,
             user_notice=None,
         )

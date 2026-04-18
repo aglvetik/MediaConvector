@@ -38,6 +38,13 @@ def _to_cache_entity(model: MediaCacheModel) -> CacheEntry:
         created_at=model.created_at,
         updated_at=model.updated_at,
         last_hit_at=model.last_hit_at,
+        raw_query=model.raw_query,
+        source_id=model.source_id,
+        title=model.title,
+        performer=model.performer,
+        thumbnail_url=model.thumbnail_url,
+        has_thumbnail=model.has_thumbnail,
+        file_name=model.file_name,
     )
 
 
@@ -74,6 +81,13 @@ class SqlAlchemyCacheRepository:
                 cache_version=version,
                 hit_count=current.hit_count if current else 0,
                 last_hit_at=current.last_hit_at if current else None,
+                raw_query=current.raw_query if current else entry.raw_query,
+                source_id=current.source_id if current else entry.source_id,
+                title=current.title if current else entry.title,
+                performer=current.performer if current else entry.performer,
+                thumbnail_url=current.thumbnail_url if current else entry.thumbnail_url,
+                has_thumbnail=current.has_thumbnail if current else entry.has_thumbnail,
+                file_name=current.file_name if current else entry.file_name,
             )
             stmt = stmt.on_conflict_do_update(
                 index_elements=[MediaCacheModel.normalized_key],
@@ -84,6 +98,13 @@ class SqlAlchemyCacheRepository:
                     "status": CacheStatus.PROCESSING.value,
                     "is_valid": True,
                     "updated_at": datetime.now(timezone.utc),
+                    "raw_query": current.raw_query if current else entry.raw_query,
+                    "source_id": current.source_id if current else entry.source_id,
+                    "title": current.title if current else entry.title,
+                    "performer": current.performer if current else entry.performer,
+                    "thumbnail_url": current.thumbnail_url if current else entry.thumbnail_url,
+                    "has_thumbnail": current.has_thumbnail if current else entry.has_thumbnail,
+                    "file_name": current.file_name if current else entry.file_name,
                 },
             )
             await session.execute(stmt)
@@ -116,6 +137,13 @@ class SqlAlchemyCacheRepository:
                 cache_version=version,
                 hit_count=current.hit_count if current else entry.hit_count,
                 last_hit_at=entry.last_hit_at,
+                raw_query=entry.raw_query,
+                source_id=entry.source_id,
+                title=entry.title,
+                performer=entry.performer,
+                thumbnail_url=entry.thumbnail_url,
+                has_thumbnail=entry.has_thumbnail,
+                file_name=entry.file_name,
             )
             stmt = stmt.on_conflict_do_update(
                 index_elements=[MediaCacheModel.normalized_key],
@@ -136,6 +164,13 @@ class SqlAlchemyCacheRepository:
                     "cache_version": version,
                     "last_hit_at": entry.last_hit_at,
                     "updated_at": datetime.now(timezone.utc),
+                    "raw_query": entry.raw_query,
+                    "source_id": entry.source_id,
+                    "title": entry.title,
+                    "performer": entry.performer,
+                    "thumbnail_url": entry.thumbnail_url,
+                    "has_thumbnail": entry.has_thumbnail,
+                    "file_name": entry.file_name,
                 },
             )
             await session.execute(stmt)
@@ -265,6 +300,17 @@ class SqlAlchemyDownloadJobRepository:
 class SqlAlchemyProcessedMessageRepository:
     def __init__(self, database: Database) -> None:
         self._database = database
+
+    async def exists(self, chat_id: int, message_id: int, normalized_key: str) -> bool:
+        async with self._database.session() as session:
+            result = await session.execute(
+                select(func.count()).where(
+                    ProcessedMessageModel.chat_id == chat_id,
+                    ProcessedMessageModel.message_id == message_id,
+                    ProcessedMessageModel.normalized_key == normalized_key,
+                )
+            )
+            return bool(result.scalar_one())
 
     async def claim(self, chat_id: int, message_id: int, normalized_key: str) -> bool:
         async with self._database.session() as session:

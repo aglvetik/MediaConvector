@@ -1,0 +1,106 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from pathlib import Path
+from typing import Any
+
+import httpx
+import yt_dlp
+
+from app.domain.entities.music_track import MusicTrack
+from app.domain.errors import MusicDownloadError
+from app.infrastructure.logging import get_logger, log_event
+
+
+class AudioDownloadClient:
+    def __init__(self, *, timeout_seconds: int, semaphore: asyncio.Semaphore) -> None:
+        self._timeout_seconds = timeout_seconds
+        self._semaphore = semaphore
+        self._logger = get_logger(__name__)
+
+    async def download_audio_source(self, track: MusicTrack, work_dir: Path) -> Path:
+        async with self._semaphore:
+            log_event(
+                self._logger,
+                logging.INFO,
+                "music_download_started",
+                source_id=track.source_id,
+                canonical_url=track.canonical_url,
+            )
+            try:
+                info = await asyncio.wait_for(
+                    asyncio.to_thread(self._download_audio, track.source_url, work_dir),
+                    timeout=self._timeout_seconds,
+                )
+            except TimeoutError as exc:
+                raise MusicDownloadError("Music audio download timed out.", context={"source_id": track.source_id}) from exc
+            downloaded_path = self._resolve_downloaded_path(work_dir, info)
+            log_event(
+                self._logger,
+                logging.INFO,
+                "music_download_finished",
+                source_id=track.source_id,
+                file_path=str(downloaded_path),
+            )
+            return downloaded_path
+
+    async def download_thumbnail(self, thumbnail_url: str, work_dir: Path, *, fallback_stem: str) -> Path | None:
+        output_path = work_dir / f"{fallback_stem}-thumb"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_seconds, follow_redirects=True) as client:
+                response = await client.get(thumbnail_url)
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            log_event(self._logger, logging.WARNING, "music_thumbnail_download_failed", thumbnail_url=thumbnail_url, error=str(exc))
+            return None
+
+        suffix = _guess_image_suffix(response.headers.get("content-type"), thumbnail_url)
+        target_path = output_path.with_suffix(suffix)
+        target_path.write_bytes(response.content)
+        if target_path.stat().st_size == 0:
+            return None
+        return target_path
+
+    def _download_audio(self, source_url: str, work_dir: Path) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "paths": {"home": str(work_dir)},
+            "outtmpl": str(work_dir / "source.%(ext)s"),
+            "format": "bestaudio/best",
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "retries": 3,
+            "socket_timeout": self._timeout_seconds,
+            "extractor_retries": 3,
+            "cachedir": False,
+        }
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                return ydl.extract_info(source_url, download=True)
+        except yt_dlp.utils.DownloadError as exc:
+            raise MusicDownloadError(str(exc), context={"source_url": source_url}) from exc
+
+    @staticmethod
+    def _resolve_downloaded_path(work_dir: Path, info: dict[str, Any]) -> Path:
+        requested_downloads = info.get("requested_downloads") or []
+        for item in requested_downloads:
+            filepath = item.get("filepath")
+            if filepath:
+                return Path(filepath)
+        filepath = info.get("_filename") or info.get("filepath")
+        if filepath:
+            return Path(filepath)
+        candidates = sorted(work_dir.glob("*"))
+        if not candidates:
+            raise MusicDownloadError("yt-dlp finished without producing a music source file.")
+        return candidates[0]
+
+
+def _guess_image_suffix(content_type: str | None, thumbnail_url: str) -> str:
+    lowered_content_type = (content_type or "").lower()
+    if "png" in lowered_content_type or thumbnail_url.lower().endswith(".png"):
+        return ".png"
+    if "webp" in lowered_content_type or thumbnail_url.lower().endswith(".webp"):
+        return ".webp"
+    return ".jpg"

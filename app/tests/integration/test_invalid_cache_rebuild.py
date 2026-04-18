@@ -4,7 +4,7 @@ from app.application.services.process_message_service import IncomingMessage
 async def test_invalid_audio_cache_rebuild(service_harness) -> None:
     text = "https://www.tiktok.com/@user/video/123456"
     first = IncomingMessage(chat_id=1, user_id=10, message_id=1, chat_type="private", text=text)
-    second = IncomingMessage(chat_id=1, user_id=10, message_id=2, chat_type="private", text=text)
+    second = IncomingMessage(chat_id=1, user_id=20, message_id=2, chat_type="private", text=text)
 
     await service_harness.process_message_service.handle_message(first)
     cache_entry = await service_harness.cache_service.get_entry("tiktok:video:123456")

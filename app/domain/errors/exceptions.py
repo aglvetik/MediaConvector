@@ -104,3 +104,27 @@ class ProcessingConflictError(AppError):
     def __init__(self, message: str = "Message already processed.") -> None:
         super().__init__(message=message, user_message="", error_code="processing_conflict")
 
+
+class MusicQueryValidationError(AppError):
+    def __init__(self, message: str, *, user_message: str, context: dict[str, object] | None = None) -> None:
+        super().__init__(
+            message=message,
+            user_message=user_message,
+            error_code="music_query_invalid",
+            context=context or {},
+        )
+
+
+class MusicNotFoundError(AppError):
+    def __init__(self, message: str = "No track search results.") -> None:
+        super().__init__(message=message, user_message=messages.MUSIC_NOT_FOUND, error_code="music_not_found")
+
+
+class MusicDownloadError(AppError):
+    def __init__(self, message: str, *, context: dict[str, object] | None = None) -> None:
+        super().__init__(
+            message=message,
+            user_message=messages.MUSIC_DOWNLOAD_FAILED,
+            error_code="music_download_failed",
+            context=context or {},
+        )

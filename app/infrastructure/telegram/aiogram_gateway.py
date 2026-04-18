@@ -25,11 +25,17 @@ class AiogramTelegramGateway:
     def is_ready(self) -> bool:
         return self._bot is not None
 
-    async def send_loading_message(self, chat_id: int, reply_to_message_id: int | None = None) -> int:
+    async def send_loading_message(
+        self,
+        chat_id: int,
+        reply_to_message_id: int | None = None,
+        *,
+        text: str,
+    ) -> int:
         message = await self._call_with_retry(
             lambda: self._bot.send_message(
                 chat_id=chat_id,
-                text=messages.LOADING_MESSAGE,
+                text=text,
                 reply_parameters=self._reply_parameters(reply_to_message_id),
             )
         )
@@ -60,12 +66,26 @@ class AiogramTelegramGateway:
         )
         return self._video_receipt_from_message(message)
 
-    async def send_audio_by_file_id(self, chat_id: int, file_id: str, caption: str, reply_to_message_id: int | None = None) -> DeliveryReceipt:
+    async def send_audio_by_file_id(
+        self,
+        chat_id: int,
+        file_id: str,
+        caption: str | None = None,
+        reply_to_message_id: int | None = None,
+        *,
+        title: str | None = None,
+        performer: str | None = None,
+        thumbnail_path: Path | None = None,
+        file_name: str | None = None,
+    ) -> DeliveryReceipt:
         message = await self._call_with_retry(
             lambda: self._bot.send_audio(
                 chat_id=chat_id,
                 audio=file_id,
                 caption=caption,
+                title=title,
+                performer=performer,
+                thumbnail=FSInputFile(thumbnail_path) if thumbnail_path is not None else None,
                 reply_parameters=self._reply_parameters(reply_to_message_id),
             ),
             media_kind="audio",
@@ -87,13 +107,27 @@ class AiogramTelegramGateway:
         )
         return self._video_receipt_from_message(message, file_path)
 
-    async def send_audio_by_upload(self, chat_id: int, file_path: Path, caption: str, reply_to_message_id: int | None = None) -> DeliveryReceipt:
+    async def send_audio_by_upload(
+        self,
+        chat_id: int,
+        file_path: Path,
+        caption: str | None = None,
+        reply_to_message_id: int | None = None,
+        *,
+        title: str | None = None,
+        performer: str | None = None,
+        thumbnail_path: Path | None = None,
+        file_name: str | None = None,
+    ) -> DeliveryReceipt:
         self._ensure_file_size(file_path)
         message = await self._call_with_retry(
             lambda: self._bot.send_audio(
                 chat_id=chat_id,
-                audio=FSInputFile(file_path),
+                audio=FSInputFile(file_path, filename=file_name),
                 caption=caption,
+                title=title,
+                performer=performer,
+                thumbnail=FSInputFile(thumbnail_path) if thumbnail_path is not None else None,
                 reply_parameters=self._reply_parameters(reply_to_message_id),
             ),
             media_kind="audio",

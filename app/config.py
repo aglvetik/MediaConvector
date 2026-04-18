@@ -30,12 +30,22 @@ class Settings(BaseSettings):
     ytdlp_path: str = Field(default="yt-dlp", alias="YTDLP_PATH")
     rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
     user_requests_per_minute: int = Field(default=4, alias="USER_REQUESTS_PER_MINUTE")
+    user_request_cooldown_seconds: int = Field(default=3, alias="USER_REQUEST_COOLDOWN_SECONDS")
+    max_music_query_length: int = Field(default=120, alias="MAX_MUSIC_QUERY_LENGTH")
+    music_search_timeout_seconds: int = Field(default=15, alias="MUSIC_SEARCH_TIMEOUT_SECONDS")
     temp_file_ttl_minutes: int = Field(default=30, alias="TEMP_FILE_TTL_MINUTES")
     cleanup_interval_minutes: int = Field(default=10, alias="CLEANUP_INTERVAL_MINUTES")
     health_interval_minutes: int = Field(default=15, alias="HEALTH_INTERVAL_MINUTES")
     job_stale_after_minutes: int = Field(default=15, alias="JOB_STALE_AFTER_MINUTES")
 
-    @field_validator("max_parallel_downloads", "max_parallel_ffmpeg", "user_requests_per_minute")
+    @field_validator(
+        "max_parallel_downloads",
+        "max_parallel_ffmpeg",
+        "user_requests_per_minute",
+        "user_request_cooldown_seconds",
+        "max_music_query_length",
+        "music_search_timeout_seconds",
+    )
     @classmethod
     def _positive_ints(cls, value: int) -> int:
         if value < 1:

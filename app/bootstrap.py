@@ -12,11 +12,14 @@ from app.application.services import (
     InFlightDedupService,
     MediaPipelineService,
     MetricsService,
+    MusicPipelineService,
+    MusicSearchService,
     ProcessMessageService,
     RateLimitService,
+    UserRequestGuardService,
 )
 from app.config import Settings
-from app.infrastructure.downloaders import YtDlpClient
+from app.infrastructure.downloaders import AudioDownloadClient, YtDlpClient
 from app.infrastructure.media import FfmpegAdapter
 from app.infrastructure.persistence.sqlite import (
     Database,
@@ -25,7 +28,7 @@ from app.infrastructure.persistence.sqlite import (
     SqlAlchemyProcessedMessageRepository,
     SqlAlchemyRequestLogRepository,
 )
-from app.infrastructure.providers import TikTokProvider
+from app.infrastructure.providers import TikTokProvider, YouTubeMusicProvider
 from app.infrastructure.telegram import AiogramTelegramGateway
 from app.infrastructure.temp import TempFileManager
 from app.workers import CleanupWorker, HealthWorker
@@ -73,11 +76,23 @@ def build_container(settings: Settings) -> AppContainer:
         downloader=ytdlp_client,
         request_timeout_seconds=settings.request_timeout_seconds,
     )
+    youtube_music_provider = YouTubeMusicProvider(
+        timeout_seconds=settings.music_search_timeout_seconds,
+        semaphore=download_semaphore,
+    )
+    audio_download_client = AudioDownloadClient(
+        timeout_seconds=settings.download_timeout_seconds,
+        semaphore=download_semaphore,
+    )
 
     metrics_service = MetricsService()
     cache_service = CacheService(cache_repository)
     delivery_service = DeliveryService(gateway)
     dedup_service = InFlightDedupService()
+    music_search_service = MusicSearchService(
+        provider=youtube_music_provider,
+        max_query_length=settings.max_music_query_length,
+    )
     media_pipeline_service = MediaPipelineService(
         cache_service=cache_service,
         dedup_service=dedup_service,
@@ -87,15 +102,32 @@ def build_container(settings: Settings) -> AppContainer:
         temp_file_manager=temp_file_manager,
         metrics_service=metrics_service,
     )
+    music_pipeline_service = MusicPipelineService(
+        cache_service=cache_service,
+        dedup_service=dedup_service,
+        delivery_service=delivery_service,
+        job_repository=download_job_repository,
+        temp_file_manager=temp_file_manager,
+        audio_download_client=audio_download_client,
+        ffmpeg_adapter=ffmpeg_adapter,
+        music_search_service=music_search_service,
+        metrics_service=metrics_service,
+    )
     rate_limit_service = RateLimitService(
         enabled=settings.rate_limit_enabled,
         requests_per_minute=settings.user_requests_per_minute,
+    )
+    user_request_guard_service = UserRequestGuardService(
+        cooldown_seconds=settings.user_request_cooldown_seconds,
     )
     process_message_service = ProcessMessageService(
         providers=(tiktok_provider,),
         delivery_service=delivery_service,
         media_pipeline_service=media_pipeline_service,
+        music_search_service=music_search_service,
+        music_pipeline_service=music_pipeline_service,
         rate_limit_service=rate_limit_service,
+        user_request_guard_service=user_request_guard_service,
         processed_message_repository=processed_message_repository,
         request_log_repository=request_log_repository,
         metrics_service=metrics_service,

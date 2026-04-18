@@ -48,7 +48,7 @@ async def test_cache_hit_flow(service_harness) -> None:
         IncomingMessage(chat_id=1, user_id=101, message_id=4, chat_type="private", text=url)
     )
     await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=101, message_id=5, chat_type="private", text=url)
+        IncomingMessage(chat_id=1, user_id=202, message_id=5, chat_type="private", text=url)
     )
     assert service_harness.provider.download_calls["tiktok:video:444"] == 1
     assert len(service_harness.gateway.sent_video_receipts) == 2
@@ -113,7 +113,7 @@ async def test_invalid_cached_video_file_id_flow(service_harness) -> None:
     assert cache_entry is not None
     service_harness.gateway.invalid_file_ids.add(cache_entry.video_file_id)
     await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=101, message_id=13, chat_type="private", text=url)
+        IncomingMessage(chat_id=1, user_id=202, message_id=13, chat_type="private", text=url)
     )
     assert service_harness.provider.download_calls["tiktok:video:999"] == 2
 
@@ -134,10 +134,97 @@ async def test_audio_extraction_failure_recovers_on_next_cached_request(service_
 
     service_harness.ffmpeg.fail_keys.clear()
     await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=101, message_id=15, chat_type="private", text=url)
+        IncomingMessage(chat_id=1, user_id=202, message_id=15, chat_type="private", text=url)
     )
     refreshed_cache_entry = await service_harness.cache_service.get_entry(normalized_key)
     assert refreshed_cache_entry is not None
     assert refreshed_cache_entry.audio_file_id is not None
     assert service_harness.provider.download_calls[normalized_key] == 2
     assert len(service_harness.gateway.sent_audio_receipts) == 1
+
+
+async def test_music_private_chat_success_flow(service_harness) -> None:
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=300, message_id=16, chat_type="private", text="найти after dark")
+    )
+    assert handled is True
+    assert len(service_harness.gateway.sent_audio_receipts) == 1
+    assert service_harness.gateway.loading_messages[-1][2] == messages.MUSIC_LOADING_MESSAGE
+    assert service_harness.gateway.audio_sends[-1].title == "After Dark"
+    assert service_harness.gateway.audio_sends[-1].performer == "Test Artist"
+
+
+async def test_music_group_chat_success_flow(service_harness) -> None:
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=-100, user_id=301, message_id=17, chat_type="group", text="трек rammstein sonne")
+    )
+    assert handled is True
+    assert len(service_harness.gateway.sent_audio_receipts) == 1
+
+
+async def test_music_cache_hit_flow(service_harness) -> None:
+    query = "песня in the end slowed"
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=302, message_id=18, chat_type="private", text=query)
+    )
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=402, message_id=19, chat_type="private", text=query)
+    )
+    assert service_harness.music_provider.search_calls["in the end slowed"] == 1
+    assert service_harness.audio_downloader.download_calls["in_the_end_slowed"] == 1
+    assert len(service_harness.gateway.sent_audio_receipts) == 2
+
+
+async def test_music_too_fast_same_user_request_flow(service_harness) -> None:
+    first = IncomingMessage(chat_id=1, user_id=303, message_id=20, chat_type="private", text="найти lana del rey")
+    second = IncomingMessage(chat_id=1, user_id=303, message_id=21, chat_type="private", text="найти lana del rey")
+    await service_harness.process_message_service.handle_message(first)
+    handled = await service_harness.process_message_service.handle_message(second)
+    assert handled is True
+    assert service_harness.gateway.text_messages[-1].text == messages.REQUEST_COOLDOWN
+    assert len(service_harness.gateway.sent_audio_receipts) == 1
+
+
+async def test_music_empty_query_flow(service_harness) -> None:
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=304, message_id=22, chat_type="private", text="найти   ")
+    )
+    assert handled is True
+    assert service_harness.gateway.text_messages[-1].text == messages.music_empty_query("найти")
+
+
+async def test_music_no_result_found_flow(service_harness) -> None:
+    service_harness.music_provider.results["ghost query"] = None
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=305, message_id=23, chat_type="private", text="песня ghost query")
+    )
+    assert handled is True
+    assert service_harness.gateway.text_messages[-1].text == messages.MUSIC_NOT_FOUND
+
+
+async def test_music_invalid_cached_audio_file_id_flow(service_harness) -> None:
+    query = "найти summertime sadness"
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=306, message_id=24, chat_type="private", text=query)
+    )
+    cache_entry = await service_harness.cache_service.get_entry("music:ytm:summertime sadness")
+    assert cache_entry is not None
+    old_audio_file_id = cache_entry.audio_file_id
+    service_harness.gateway.invalid_file_ids.add(old_audio_file_id)
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=406, message_id=25, chat_type="private", text=query)
+    )
+    refreshed = await service_harness.cache_service.get_entry("music:ytm:summertime sadness")
+    assert refreshed is not None
+    assert refreshed.audio_file_id != old_audio_file_id
+    assert service_harness.audio_downloader.download_calls["summertime_sadness"] == 2
+
+
+async def test_music_thumbnail_failure_is_optional(service_harness) -> None:
+    service_harness.audio_downloader.fail_thumbnail_ids.add("after_dark")
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=307, message_id=26, chat_type="private", text="найти after dark")
+    )
+    assert handled is True
+    assert len(service_harness.gateway.sent_audio_receipts) == 1
+    assert service_harness.gateway.audio_sends[-1].has_thumbnail is False
