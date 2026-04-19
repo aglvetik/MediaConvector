@@ -286,6 +286,7 @@ class DeliveryService:
             return result
 
         try:
+            self._validate_audio_upload(audio_path, filename)
             log_event(
                 self._logger,
                 20,
@@ -293,7 +294,7 @@ class DeliveryService:
                 request_id=request.request_id,
                 chat_id=request.chat_id,
                 normalized_key=request.normalized_resource.normalized_key,
-                cached=False,
+                cached=cache_hit,
             )
             audio_receipt = await self._gateway.send_audio_by_upload(
                 request.chat_id,
@@ -326,9 +327,16 @@ class DeliveryService:
                 request_id=request.request_id,
                 chat_id=request.chat_id,
                 normalized_key=request.normalized_resource.normalized_key,
-                cached=False,
+                cached=cache_hit,
             )
         except AppError as exc:
+            self._log_audio_send_failure(
+                request=request,
+                exc=exc,
+                audio_path=audio_path,
+                filename=filename,
+                cached=cache_hit,
+            )
             notice = exc.user_message or failure_notice
             await self._gateway.send_text(request.chat_id, notice, request.message_id)
             result = self._build_result(
@@ -351,7 +359,14 @@ class DeliveryService:
                 delivery_status=result.delivery_status.value,
             )
             return result
-        except Exception:
+        except Exception as exc:
+            self._log_audio_send_failure(
+                request=request,
+                exc=exc,
+                audio_path=audio_path,
+                filename=filename,
+                cached=cache_hit,
+            )
             await self._gateway.send_text(request.chat_id, failure_notice, request.message_id)
             result = self._build_result(
                 primary_sent=primary_delivered,
@@ -558,15 +573,25 @@ class DeliveryService:
             normalized_key=request.normalized_resource.normalized_key,
             cached=True,
         )
-        audio_receipt = await self._gateway.send_audio_by_file_id(
-            request.chat_id,
-            audio_file_id,
-            messages.AUDIO_SUCCESS_CAPTION,
-            request.message_id,
-            title=title,
-            performer=performer,
-            duration=request.normalized_resource.duration_sec,
-        )
+        try:
+            audio_receipt = await self._gateway.send_audio_by_file_id(
+                request.chat_id,
+                audio_file_id,
+                messages.AUDIO_SUCCESS_CAPTION,
+                request.message_id,
+                title=title,
+                performer=performer,
+                duration=request.normalized_resource.duration_sec,
+            )
+        except Exception as exc:
+            self._log_audio_send_failure(
+                request=request,
+                exc=exc,
+                audio_path=None,
+                filename=None,
+                cached=True,
+            )
+            raise
         log_event(
             self._logger,
             20,
@@ -637,6 +662,13 @@ class DeliveryService:
                     audio_filename=None,
                 )
             except InvalidCachedMediaError as exc:
+                self._log_audio_send_failure(
+                    request=request,
+                    exc=exc,
+                    audio_path=None,
+                    filename=None,
+                    cached=True,
+                )
                 preserved_context = {
                     key: value for key, value in exc.context.items() if key not in {"video_sent", "media_kind"}
                 }
@@ -646,6 +678,15 @@ class DeliveryService:
                     video_sent=primary_sent,
                     context=preserved_context,
                 ) from exc
+            except Exception as exc:
+                self._log_audio_send_failure(
+                    request=request,
+                    exc=exc,
+                    audio_path=None,
+                    filename=None,
+                    cached=True,
+                )
+                raise
             log_event(
                 self._logger,
                 20,
@@ -695,6 +736,7 @@ class DeliveryService:
             return None, missing_audio_notice
 
         try:
+            self._validate_audio_upload(audio_path, filename)
             log_event(
                 self._logger,
                 20,
@@ -739,6 +781,13 @@ class DeliveryService:
             )
             return audio_receipt, None
         except AppError as exc:
+            self._log_audio_send_failure(
+                request=request,
+                exc=exc,
+                audio_path=audio_path,
+                filename=filename,
+                cached=False,
+            )
             notice = exc.user_message or messages.SEPARATE_AUDIO_SEND_FAILED
             await self._gateway.send_text(request.chat_id, notice, request.message_id)
             log_event(
@@ -751,7 +800,14 @@ class DeliveryService:
                 error_code=exc.error_code,
             )
             return None, notice
-        except Exception:
+        except Exception as exc:
+            self._log_audio_send_failure(
+                request=request,
+                exc=exc,
+                audio_path=audio_path,
+                filename=filename,
+                cached=False,
+            )
             await self._gateway.send_text(request.chat_id, messages.SEPARATE_AUDIO_SEND_FAILED, request.message_id)
             log_event(
                 self._logger,
@@ -890,6 +946,77 @@ class DeliveryService:
                 )
             )
         return tuple(receipts)
+
+    def _validate_audio_upload(self, audio_path: Path, filename: str | None) -> None:
+        if not audio_path.exists():
+            raise AppError(
+                message="Prepared audio file is missing.",
+                user_message=messages.TEMPORARY_DOWNLOAD_ERROR,
+                error_code="audio_file_missing",
+                context=self._audio_file_context(audio_path, filename),
+            )
+        file_size = audio_path.stat().st_size
+        if file_size <= 0:
+            raise AppError(
+                message="Prepared audio file is empty.",
+                user_message=messages.TEMPORARY_DOWNLOAD_ERROR,
+                error_code="audio_file_empty",
+                context=self._audio_file_context(audio_path, filename),
+            )
+        resolved_filename = filename or audio_path.name
+        filename_extension = Path(resolved_filename).suffix.lower()
+        file_extension = audio_path.suffix.lower()
+        if filename_extension and file_extension and filename_extension != file_extension:
+            raise AppError(
+                message="Prepared audio filename extension does not match file extension.",
+                user_message=messages.TEMPORARY_DOWNLOAD_ERROR,
+                error_code="audio_filename_mismatch",
+                context=self._audio_file_context(audio_path, resolved_filename),
+            )
+
+    def _log_audio_send_failure(
+        self,
+        *,
+        request: MediaRequest,
+        exc: Exception,
+        audio_path: Path | None,
+        filename: str | None,
+        cached: bool,
+    ) -> None:
+        context = self._audio_file_context(audio_path, filename)
+        log_event(
+            self._logger,
+            30,
+            "telegram_send_audio_failed",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            cached=cached,
+            exception_type=type(exc).__name__,
+            exception_message=str(exc),
+            audio_file_path=context["audio_file_path"],
+            audio_file_exists=context["audio_file_exists"],
+            audio_file_size=context["audio_file_size"],
+            audio_filename=context["audio_filename"],
+        )
+
+    @staticmethod
+    def _audio_file_context(audio_path: Path | None, filename: str | None) -> dict[str, object]:
+        if audio_path is None:
+            return {
+                "audio_file_path": None,
+                "audio_file_exists": False,
+                "audio_file_size": None,
+                "audio_filename": filename,
+            }
+        exists = audio_path.exists()
+        size = audio_path.stat().st_size if exists else None
+        return {
+            "audio_file_path": str(audio_path),
+            "audio_file_exists": exists,
+            "audio_file_size": size,
+            "audio_filename": filename or audio_path.name,
+        }
 
     @staticmethod
     def _build_result(

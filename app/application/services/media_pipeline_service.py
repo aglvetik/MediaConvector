@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import shutil
 from typing import Literal
 
 import httpx
@@ -35,12 +36,21 @@ class OwnerPipelineResult:
 
 @dataclass(slots=True)
 class PreparedAudioAsset:
-    file_path: Path
+    final_audio_path: Path
+    container_extension: str
+    telegram_filename: str
     title: str | None
     performer: str | None
     duration_sec: int | None
     thumbnail_path: Path | None
-    filename: str
+
+    @property
+    def file_path(self) -> Path:
+        return self.final_audio_path
+
+    @property
+    def filename(self) -> str:
+        return self.telegram_filename
 
 
 @dataclass(slots=True)
@@ -743,6 +753,7 @@ class MediaPipelineService:
         fatal_on_failure: bool,
         missing_notice: str,
         failure_notice: str,
+        preferred_container: Literal["mp3", "source"] = "mp3",
         fallback_cover_path: Path | None = None,
     ) -> PreparedAudioResult:
         try:
@@ -751,6 +762,7 @@ class MediaPipelineService:
                 metadata=metadata,
                 source_path=source_path,
                 work_dir=work_dir,
+                preferred_container=preferred_container,
                 fallback_cover_path=fallback_cover_path,
             )
             return PreparedAudioResult(status="prepared", asset=asset)
@@ -790,12 +802,15 @@ class MediaPipelineService:
         metadata: MediaMetadata | None,
         source_path: Path,
         work_dir: Path,
+        preferred_container: Literal["mp3", "source"] = "mp3",
         fallback_cover_path: Path | None = None,
     ) -> PreparedAudioAsset:
         title = self._resolve_audio_title(request, metadata)
         performer = self._resolve_audio_performer(request, metadata)
         duration_sec = metadata.duration_sec if metadata is not None else request.normalized_resource.duration_sec
-        filename = self._build_audio_filename(request, title, performer)
+        source_extension = self._resolve_audio_extension(source_path)
+        final_extension = "mp3" if preferred_container == "mp3" else source_extension
+        filename = self._build_audio_filename(request, title, performer, extension=final_extension)
         thumbnail_path = await self._prepare_audio_thumbnail(
             request=request,
             work_dir=work_dir,
@@ -812,34 +827,53 @@ class MediaPipelineService:
             duration_sec=duration_sec,
             thumbnail_available=thumbnail_path is not None,
             audio_filename=filename,
+            source_audio_extension=source_extension,
+            final_audio_extension=final_extension,
         )
         output_path = work_dir / filename
-        prepared = await self._ffmpeg_adapter.transcode_audio_to_mp3(
-            source_path,
-            output_path,
-            normalized_key=request.normalized_resource.normalized_key,
-            title=title,
-            performer=performer,
-            cover_path=thumbnail_path,
-        )
-        log_event(
-            self._logger,
-            20,
-            "audio_tags_written",
-            request_id=request.request_id,
-            normalized_key=request.normalized_resource.normalized_key,
-            file_path=str(prepared),
-            title=title,
-            performer=performer,
-            audio_filename=filename,
-        )
+        if preferred_container == "mp3":
+            prepared = await self._ffmpeg_adapter.transcode_audio_to_mp3(
+                source_path,
+                output_path,
+                normalized_key=request.normalized_resource.normalized_key,
+                title=title,
+                performer=performer,
+                cover_path=thumbnail_path,
+            )
+            log_event(
+                self._logger,
+                20,
+                "audio_tags_written",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                file_path=str(prepared),
+                title=title,
+                performer=performer,
+                audio_filename=filename,
+                final_audio_extension=final_extension,
+            )
+        else:
+            if source_path.resolve() != output_path.resolve():
+                shutil.copy2(source_path, output_path)
+            prepared = output_path
+            log_event(
+                self._logger,
+                20,
+                "audio_asset_prepared_without_transcode",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                file_path=str(prepared),
+                audio_filename=filename,
+                final_audio_extension=final_extension,
+            )
         return PreparedAudioAsset(
-            file_path=prepared,
+            final_audio_path=prepared,
+            container_extension=final_extension,
+            telegram_filename=filename,
             title=title,
             performer=performer,
             duration_sec=duration_sec,
             thumbnail_path=thumbnail_path,
-            filename=filename,
         )
 
     async def _prepare_audio_thumbnail(
@@ -911,7 +945,14 @@ class MediaPipelineService:
                     return cleaned
         return request.normalized_resource.platform.value.title()
 
-    def _build_audio_filename(self, request: MediaRequest, title: str | None, performer: str | None) -> str:
+    def _build_audio_filename(
+        self,
+        request: MediaRequest,
+        title: str | None,
+        performer: str | None,
+        *,
+        extension: str,
+    ) -> str:
         parts = [performer or "", title or ""]
         stem = " - ".join(part for part in parts if part).strip()
         if not stem:
@@ -920,4 +961,9 @@ class MediaPipelineService:
         safe = " ".join(safe.split()).strip(" ._")
         if not safe:
             safe = f"{request.normalized_resource.platform.value}-audio"
-        return f"{safe[:96]}.mp3"
+        return f"{safe[:96]}.{extension}"
+
+    @staticmethod
+    def _resolve_audio_extension(source_path: Path) -> str:
+        extension = source_path.suffix.lower().lstrip(".")
+        return extension or "bin"

@@ -43,6 +43,7 @@ async def database(tmp_path: Path) -> Database:
 class ServiceHarness:
     cache_service: CacheService
     delivery_service: DeliveryService
+    media_pipeline_service: MediaPipelineService
     metrics_service: MetricsService
     process_message_service: ProcessMessageService
     gateway: FakeGateway
@@ -102,6 +103,7 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
     return ServiceHarness(
         cache_service=cache_service,
         delivery_service=delivery_service,
+        media_pipeline_service=media_pipeline_service,
         metrics_service=metrics,
         process_message_service=process_message_service,
         gateway=gateway,
