@@ -13,6 +13,7 @@ class StubDownloader:
         self._info = info
         self.probe_urls: list[str] = []
         self.download_audio_urls: list[str] = []
+        self.download_video_urls: list[str] = []
         self.fetch_metadata_urls: list[str] = []
 
     async def probe_url(self, url: str, *, extra_options: dict[str, object] | None = None) -> dict[str, object]:
@@ -36,6 +37,21 @@ class StubDownloader:
         self.download_audio_urls.append(url)
         target = work_dir / "audio.m4a"
         target.write_bytes(b"audio")
+        from app.domain.entities.media_result import MediaMetadata
+
+        return target, MediaMetadata(
+            title=self._info.get("title"),
+            duration_sec=self._info.get("duration"),
+            author=self._info.get("uploader"),
+            description=None,
+            size_bytes=None,
+            has_audio=True,
+        )
+
+    async def download_video(self, normalized, work_dir: Path):
+        self.download_video_urls.append(normalized.canonical_url)
+        target = work_dir / "video.mp4"
+        target.write_bytes(b"video")
         from app.domain.entities.media_result import MediaMetadata
 
         return target, MediaMetadata(
@@ -335,7 +351,15 @@ async def test_tiktok_music_url_normalization_skips_gallery_probe(monkeypatch) -
         return url
 
     async def fake_load_web_state(url: str) -> dict[str, object]:
-        return {}
+        return {
+            "musicInfo": {
+                "originalVideo": {
+                    "id": "1234567890123456789",
+                    "authorName": "creator",
+                    "musicId": "777777",
+                }
+            }
+        }
 
     monkeypatch.setattr(provider, "_resolve_short_url", fake_resolve_short_url)
     monkeypatch.setattr(provider, "_load_web_state", fake_load_web_state)
@@ -345,11 +369,14 @@ async def test_tiktok_music_url_normalization_skips_gallery_probe(monkeypatch) -
     assert normalized.resource_type == "music_only"
     assert normalized.engine_name == "yt-dlp"
     assert normalized.normalized_key == "tiktok:music_only:777777"
+    assert normalized.source_video_url == "https://www.tiktok.com/@creator/video/1234567890123456789"
+    assert normalized.source_video_id == "1234567890123456789"
     assert gallery_downloader.probe_urls == []
+    assert downloader.probe_urls == []
 
 
 @pytest.mark.asyncio
-async def test_tiktok_music_url_downloads_audio_via_ytdlp_path(monkeypatch, tmp_path: Path) -> None:
+async def test_tiktok_music_url_prefers_original_source_video_download(monkeypatch, tmp_path: Path) -> None:
     downloader = StubDownloader(
         {
             "id": "888888",
@@ -368,7 +395,15 @@ async def test_tiktok_music_url_downloads_audio_via_ytdlp_path(monkeypatch, tmp_
         return url
 
     async def fake_load_web_state(url: str) -> dict[str, object]:
-        return {}
+        return {
+            "musicInfo": {
+                "originalVideo": {
+                    "id": "998877665544332211",
+                    "authorName": "creator",
+                    "musicId": "888888",
+                }
+            }
+        }
 
     monkeypatch.setattr(provider, "_resolve_short_url", fake_resolve_short_url)
     monkeypatch.setattr(provider, "_load_web_state", fake_load_web_state)
@@ -378,7 +413,74 @@ async def test_tiktok_music_url_downloads_audio_via_ytdlp_path(monkeypatch, tmp_
 
     assert audio_path is not None
     assert audio_path.exists()
-    assert downloader.download_audio_urls == ["https://www.tiktok.com/music/original-sound-888888"]
+    assert audio_path.suffix == ".mp4"
+    assert downloader.download_video_urls == ["https://www.tiktok.com/@creator/video/998877665544332211"]
+    assert downloader.download_audio_urls == []
+
+
+@pytest.mark.asyncio
+async def test_tiktok_music_url_prefers_original_source_over_related_candidate(monkeypatch) -> None:
+    downloader = StubDownloader({"id": "999999", "title": "Sound", "uploader": "Creator"})
+    provider = TikTokProvider(downloader=downloader, request_timeout_seconds=10)
+
+    async def fake_resolve_short_url(url: str) -> str:
+        return url
+
+    async def fake_load_web_state(url: str) -> dict[str, object]:
+        return {
+            "musicFeed": {
+                "related": [
+                    {
+                        "itemId": "1111111111111111111",
+                        "authorName": "related_author",
+                        "musicId": "999999",
+                    }
+                ],
+                "originalVideo": {
+                    "itemId": "2222222222222222222",
+                    "authorName": "source_author",
+                    "musicId": "999999",
+                },
+            }
+        }
+
+    monkeypatch.setattr(provider, "_resolve_short_url", fake_resolve_short_url)
+    monkeypatch.setattr(provider, "_load_web_state", fake_load_web_state)
+
+    normalized = await provider.normalize("https://www.tiktok.com/music/original-sound-999999")
+
+    assert normalized.source_video_url == "https://www.tiktok.com/@source_author/video/2222222222222222222"
+    assert normalized.source_resolution_strategy == "original_source_video"
+
+
+@pytest.mark.asyncio
+async def test_tiktok_music_url_uses_direct_audio_last_resort_only_when_source_resolution_fails(monkeypatch, tmp_path: Path) -> None:
+    downloader = StubDownloader(
+        {
+            "id": "123123",
+            "title": "Fallback sound",
+            "uploader": "Creator",
+            "formats": [{"url": "https://v16.tiktokcdn.com/audio.m4a", "vcodec": "none", "acodec": "aac"}],
+        }
+    )
+    provider = TikTokProvider(downloader=downloader, request_timeout_seconds=10)
+
+    async def fake_resolve_short_url(url: str) -> str:
+        return url
+
+    async def fake_load_web_state(url: str) -> dict[str, object]:
+        return {}
+
+    monkeypatch.setattr(provider, "_resolve_short_url", fake_resolve_short_url)
+    monkeypatch.setattr(provider, "_load_web_state", fake_load_web_state)
+
+    normalized = await provider.normalize("https://www.tiktok.com/music/original-sound-123123")
+    audio_path = await provider.download_audio(normalized, tmp_path)
+
+    assert normalized.source_video_url is None
+    assert audio_path is not None
+    assert audio_path.suffix == ".m4a"
+    assert downloader.download_audio_urls == ["https://www.tiktok.com/music/original-sound-123123"]
 
 
 @pytest.mark.asyncio

@@ -318,6 +318,20 @@ class MediaPipelineService:
         work_dir: Path,
     ) -> OwnerPipelineResult:
         metadata = await provider.fetch_metadata(request.normalized_resource)
+        is_tiktok_music_only = (
+            request.normalized_resource.platform.value == "tiktok"
+            and request.normalized_resource.resource_type == "music_only"
+        )
+        if is_tiktok_music_only:
+            log_event(
+                self._logger,
+                20,
+                "tiktok_music_audio_only_delivery_started",
+                request_id=request.request_id,
+                chat_id=request.chat_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_video_url=request.normalized_resource.source_video_url,
+            )
         log_event(
             self._logger,
             20,
@@ -390,6 +404,16 @@ class MediaPipelineService:
             normalized_key=request.normalized_resource.normalized_key,
             success=media_result.audio_receipt is not None,
         )
+        if is_tiktok_music_only:
+            log_event(
+                self._logger,
+                20,
+                "tiktok_music_audio_only_delivery_finished",
+                request_id=request.request_id,
+                chat_id=request.chat_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                success=media_result.audio_receipt is not None,
+            )
         return OwnerPipelineResult(media_result=media_result, cache_entry=cache_entry)
 
     async def _refresh_missing_audio(

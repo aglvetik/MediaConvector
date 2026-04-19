@@ -20,6 +20,9 @@ class NormalizedResource:
     author: str | None = None
     video_url: str | None = None
     audio_url: str | None = None
+    source_video_url: str | None = None
+    source_video_id: str | None = None
+    source_resolution_strategy: str | None = None
     image_urls: tuple[str, ...] = ()
     image_entries: tuple[VisualMediaEntry, ...] = ()
     thumbnail_url: str | None = None

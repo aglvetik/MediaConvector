@@ -67,6 +67,14 @@ class _PreparedGalleryBundle:
     video_files: tuple[Path, ...]
 
 
+@dataclass(slots=True, frozen=True)
+class _TikTokMusicSourceCandidate:
+    video_url: str
+    video_id: str
+    strategy: str
+    score: int
+
+
 class TikTokProvider:
     platform_name = Platform.TIKTOK.value
 
@@ -120,19 +128,30 @@ class TikTokProvider:
 
             resource_type_hint = self._resolve_resource_type_hint(cleaned_url)
             info: dict[str, object] = {}
-            try:
-                info = await self._downloader.probe_url(cleaned_url)
-            except DownloadError as exc:
+            if resource_type_hint == TikTokResourceType.MUSIC_ONLY:
                 log_event(
                     self._logger,
-                    30,
-                    "tiktok_probe_failed",
-                    original_url=original_url,
-                    expanded_url=expanded_url,
-                    cleaned_url=cleaned_url,
-                    reason=str(exc),
+                    20,
+                    "tiktok_probe_skipped",
+                    canonical_url=cleaned_url,
+                    resource_type=resource_type_hint.value,
+                    skipped_engine="yt-dlp",
+                    reason="music_only_uses_source_resolution",
                 )
-                info = {}
+            else:
+                try:
+                    info = await self._downloader.probe_url(cleaned_url)
+                except DownloadError as exc:
+                    log_event(
+                        self._logger,
+                        30,
+                        "tiktok_probe_failed",
+                        original_url=original_url,
+                        expanded_url=expanded_url,
+                        cleaned_url=cleaned_url,
+                        reason=str(exc),
+                    )
+                    info = {}
 
             resource_type = resource_type_hint or self._resolve_resource_type(cleaned_url, info)
             resource_id = self._resolve_resource_id(cleaned_url, info, resource_type)
@@ -152,11 +171,48 @@ class TikTokProvider:
             image_urls = tuple(selection.url for selection in image_selections)
             audio_url = self._extract_audio_url(info, web_state)
             video_url = self._extract_video_url(info)
+            source_video_url: str | None = None
+            source_video_id: str | None = None
+            source_resolution_strategy: str | None = None
             thumbnail_url = self._extract_thumbnail_url(info, web_state)
             title = self._extract_title(info, web_state)
             author = self._extract_author(info, web_state)
             duration_sec = self._extract_duration(info, web_state)
             gallery_artifact: SourceMediaArtifact | None = None
+            if resource_type == TikTokResourceType.MUSIC_ONLY:
+                log_event(
+                    self._logger,
+                    20,
+                    "tiktok_music_source_resolution_started",
+                    canonical_url=canonical_url,
+                    music_id=resource_id,
+                )
+                source_video_url, source_video_id, source_resolution_strategy = self._resolve_music_source_video(
+                    canonical_url=canonical_url,
+                    resource_id=resource_id,
+                    web_state=web_state,
+                    info=info,
+                )
+                if source_video_url is not None:
+                    log_event(
+                        self._logger,
+                        20,
+                        "tiktok_music_source_video_resolved",
+                        canonical_url=canonical_url,
+                        music_id=resource_id,
+                        source_video_url=source_video_url,
+                        source_video_id=source_video_id,
+                        resolution_strategy=source_resolution_strategy,
+                    )
+                else:
+                    log_event(
+                        self._logger,
+                        30,
+                        "tiktok_music_source_video_resolution_failed",
+                        canonical_url=canonical_url,
+                        music_id=resource_id,
+                        reason="source_video_not_found",
+                    )
             if resource_type == TikTokResourceType.PHOTO_POST:
                 gallery_artifact = await self._build_gallery_artifact(
                     canonical_url=canonical_url,
@@ -204,6 +260,9 @@ class TikTokProvider:
                 author=author,
                 video_url=video_url,
                 audio_url=audio_url,
+                source_video_url=source_video_url,
+                source_video_id=source_video_id,
+                source_resolution_strategy=source_resolution_strategy,
                 image_urls=image_urls,
                 image_entries=gallery_artifact.image_entries
                 if gallery_artifact is not None
@@ -298,13 +357,43 @@ class TikTokProvider:
                 has_expected_audio=normalized.has_expected_audio,
             )
         elif resource_type == TikTokResourceType.MUSIC_ONLY:
-            log_event(self._logger, 20, "tiktok_music_link_detected", normalized_key=normalized.normalized_key)
+            log_event(
+                self._logger,
+                20,
+                "tiktok_music_link_detected",
+                normalized_key=normalized.normalized_key,
+                source_video_url=normalized.source_video_url,
+                source_video_id=normalized.source_video_id,
+                source_resolution_strategy=normalized.source_resolution_strategy,
+            )
         else:
             log_event(self._logger, 20, "normalization_completed", normalized_key=normalized.normalized_key, canonical_url=normalized.canonical_url)
         return normalized
 
     async def fetch_metadata(self, normalized: NormalizedResource) -> MediaMetadata:
         if normalized.resource_type == TikTokResourceType.MUSIC_ONLY.value:
+            if normalized.source_video_url:
+                try:
+                    metadata = await self._downloader.fetch_metadata(self._build_source_video_resource(normalized))
+                except DownloadError as exc:
+                    log_event(
+                        self._logger,
+                        30,
+                        "tiktok_music_metadata_fallback",
+                        normalized_key=normalized.normalized_key,
+                        canonical_url=normalized.canonical_url,
+                        source_video_url=normalized.source_video_url,
+                        error_code=exc.error_code,
+                    )
+                else:
+                    return MediaMetadata(
+                        title=normalized.title or metadata.title,
+                        duration_sec=normalized.duration_sec or metadata.duration_sec,
+                        author=normalized.author or metadata.author,
+                        description=metadata.description,
+                        size_bytes=metadata.size_bytes,
+                        has_audio=True if metadata.has_audio is not False else metadata.has_audio,
+                    )
             try:
                 return await self._downloader.fetch_metadata(normalized)
             except DownloadError as exc:
@@ -346,6 +435,35 @@ class TikTokProvider:
                 return bundle.audio_files[0]
             return await self._download_audio_via_ytdlp(normalized, work_dir, allow_direct_fallback=normalized.audio_url is not None)
         if normalized.resource_type == TikTokResourceType.MUSIC_ONLY.value:
+            if normalized.source_video_url:
+                log_event(
+                    self._logger,
+                    20,
+                    "tiktok_music_pipeline_using_source_video",
+                    normalized_key=normalized.normalized_key,
+                    canonical_url=normalized.canonical_url,
+                    source_video_url=normalized.source_video_url,
+                    source_video_id=normalized.source_video_id,
+                )
+                source_video = self._build_source_video_resource(normalized)
+                path, _ = await self._downloader.download_video(source_video, work_dir)
+                return path
+            log_event(
+                self._logger,
+                30,
+                "tiktok_music_source_video_fallback_used",
+                normalized_key=normalized.normalized_key,
+                canonical_url=normalized.canonical_url,
+                reason="source_video_unresolved",
+            )
+            log_event(
+                self._logger,
+                30,
+                "tiktok_music_direct_audio_last_resort_used",
+                normalized_key=normalized.normalized_key,
+                canonical_url=normalized.canonical_url,
+                audio_source_url=normalized.audio_url,
+            )
             return await self._download_audio_via_ytdlp(normalized, work_dir, allow_direct_fallback=normalized.audio_url is not None)
         if normalized.audio_url is None:
             return None
@@ -353,6 +471,24 @@ class TikTokProvider:
         audio_path = work_dir / f"{normalized.resource_id}-audio.{extension}"
         await self._download_binary(normalized.audio_url, audio_path)
         return audio_path
+
+    def _build_source_video_resource(self, normalized: NormalizedResource) -> NormalizedResource:
+        source_video_url = normalized.source_video_url or normalized.canonical_url
+        source_video_id = normalized.source_video_id or extract_video_id(source_video_url) or normalized.resource_id
+        return NormalizedResource(
+            platform=Platform.TIKTOK,
+            resource_type=TikTokResourceType.VIDEO.value,
+            resource_id=source_video_id,
+            normalized_key=normalized.normalized_key,
+            original_url=normalized.original_url,
+            canonical_url=source_video_url,
+            engine_name="yt-dlp",
+            media_kind="video",
+            title=normalized.title,
+            author=normalized.author,
+            thumbnail_url=normalized.thumbnail_url,
+            duration_sec=normalized.duration_sec,
+        )
 
     async def download_image_entry(
         self,
@@ -700,6 +836,251 @@ class TikTokProvider:
         if resource_type == TikTokResourceType.PHOTO_POST:
             return "gallery" if len(image_urls) > 1 else "photo"
         return "video"
+
+    def _resolve_music_source_video(
+        self,
+        *,
+        canonical_url: str,
+        resource_id: str,
+        web_state: dict[str, object],
+        info: dict[str, object],
+    ) -> tuple[str | None, str | None, str | None]:
+        candidates = self._collect_music_source_candidates(web_state, music_id=resource_id, path="web_state")
+        if info:
+            candidates.extend(self._collect_music_source_candidates(info, music_id=resource_id, path="probe"))
+        if not candidates:
+            return None, None, None
+
+        best_by_key: dict[str, _TikTokMusicSourceCandidate] = {}
+        for candidate in candidates:
+            key = candidate.video_id or candidate.video_url
+            current = best_by_key.get(key)
+            if current is None or candidate.score > current.score:
+                best_by_key[key] = candidate
+        best = max(best_by_key.values(), key=lambda item: (item.score, -len(item.video_url)))
+        return best.video_url, best.video_id, best.strategy
+
+    def _collect_music_source_candidates(
+        self,
+        payload: object,
+        *,
+        music_id: str,
+        path: str,
+    ) -> list[_TikTokMusicSourceCandidate]:
+        candidates: list[_TikTokMusicSourceCandidate] = []
+        if isinstance(payload, dict):
+            candidate = self._build_music_source_candidate(payload, music_id=music_id, path=path)
+            if candidate is not None:
+                candidates.append(candidate)
+            for key, value in payload.items():
+                candidates.extend(self._collect_music_source_candidates(value, music_id=music_id, path=f"{path}.{key}"))
+            return candidates
+        if isinstance(payload, list):
+            for index, item in enumerate(payload):
+                candidates.extend(self._collect_music_source_candidates(item, music_id=music_id, path=f"{path}[{index}]"))
+            return candidates
+        if isinstance(payload, str):
+            direct_url = self._normalize_candidate_video_url(payload)
+            if direct_url is not None:
+                video_id = extract_video_id(direct_url)
+                if video_id:
+                    candidates.append(
+                        _TikTokMusicSourceCandidate(
+                            video_url=direct_url,
+                            video_id=video_id,
+                            strategy="direct_video_url",
+                            score=self._score_music_source_candidate(
+                                path=path,
+                                music_match=False,
+                                has_direct_url=True,
+                                has_author_handle=False,
+                                has_original_flag=False,
+                            ),
+                        )
+                    )
+            return candidates
+        return candidates
+
+    def _build_music_source_candidate(
+        self,
+        payload: dict[str, object],
+        *,
+        music_id: str,
+        path: str,
+    ) -> _TikTokMusicSourceCandidate | None:
+        direct_url = self._pick_first_tiktok_video_url(payload)
+        video_id = extract_video_id(direct_url) if direct_url else None
+        music_match = self._mapping_matches_music_id(payload, music_id)
+        has_original_flag = self._mapping_has_original_source_flag(payload)
+        if video_id is None:
+            for key in ("itemId", "item_id", "videoId", "video_id", "aweme_id"):
+                raw_value = payload.get(key)
+                if raw_value is None:
+                    continue
+                candidate = str(raw_value).strip()
+                if candidate.isdigit():
+                    video_id = candidate
+                    break
+        if video_id is None and (music_match or has_original_flag or self._path_suggests_original_source(path)):
+            raw_value = payload.get("id")
+            candidate = str(raw_value).strip() if raw_value is not None else ""
+            if candidate.isdigit():
+                video_id = candidate
+        if not video_id:
+            return None
+
+        author_handle = self._extract_author_handle(payload)
+        video_url = direct_url or self._build_tiktok_video_url(video_id, author_handle)
+        score = self._score_music_source_candidate(
+            path=path,
+            music_match=music_match,
+            has_direct_url=direct_url is not None,
+            has_author_handle=author_handle is not None,
+            has_original_flag=has_original_flag,
+        )
+        if music_match and (has_original_flag or self._path_suggests_original_source(path)):
+            strategy = "original_source_video"
+        elif music_match:
+            strategy = "music_matched_video"
+        elif has_original_flag or self._path_suggests_original_source(path):
+            strategy = "source_flag_video"
+        else:
+            strategy = "fallback_video_candidate"
+        return _TikTokMusicSourceCandidate(
+            video_url=video_url,
+            video_id=video_id,
+            strategy=strategy,
+            score=score,
+        )
+
+    def _pick_first_tiktok_video_url(self, payload: object) -> str | None:
+        if isinstance(payload, str):
+            return self._normalize_candidate_video_url(payload)
+        if isinstance(payload, dict):
+            for key in ("url", "shareUrl", "webUrl", "webpage_url", "itemUrl", "canonical_url"):
+                candidate = payload.get(key)
+                if not isinstance(candidate, str):
+                    continue
+                normalized = self._normalize_candidate_video_url(candidate)
+                if normalized is not None:
+                    return normalized
+            for value in payload.values():
+                normalized = self._pick_first_tiktok_video_url(value)
+                if normalized is not None:
+                    return normalized
+            return None
+        if isinstance(payload, list):
+            for item in payload:
+                normalized = self._pick_first_tiktok_video_url(item)
+                if normalized is not None:
+                    return normalized
+        return None
+
+    def _normalize_candidate_video_url(self, value: str) -> str | None:
+        cleaned = value.strip()
+        if not cleaned.startswith(("http://", "https://")):
+            return None
+        if not is_tiktok_host(cleaned):
+            return None
+        sanitized = sanitize_url(cleaned)
+        if extract_video_id(sanitized) is None:
+            return None
+        return sanitized
+
+    def _extract_author_handle(self, payload: dict[str, object]) -> str | None:
+        for candidate in self._find_values(
+            payload,
+            {
+                "authorName",
+                "author_name",
+                "uniqueId",
+                "unique_id",
+                "username",
+                "userName",
+                "handle",
+            },
+        ):
+            if not isinstance(candidate, str):
+                continue
+            normalized = self._sanitize_author_handle(candidate)
+            if normalized is not None:
+                return normalized
+        author = payload.get("author")
+        if isinstance(author, str):
+            return self._sanitize_author_handle(author)
+        if isinstance(author, dict):
+            nested = self._extract_author_handle(author)
+            if nested is not None:
+                return nested
+        return None
+
+    @staticmethod
+    def _sanitize_author_handle(value: str) -> str | None:
+        cleaned = value.strip().lstrip("@")
+        if not cleaned or cleaned.isdigit() or " " in cleaned or "/" in cleaned or cleaned.startswith("http"):
+            return None
+        return cleaned
+
+    def _mapping_matches_music_id(self, payload: dict[str, object], music_id: str) -> bool:
+        for candidate in self._find_values(payload, {"musicId", "music_id", "musicID", "musicid"}):
+            if str(candidate).strip() == music_id:
+                return True
+        for key in ("music", "musicInfo", "music_info", "musicData", "music_data"):
+            value = payload.get(key)
+            if not isinstance(value, dict):
+                continue
+            for nested_key in ("id", "itemId", "musicId", "music_id"):
+                if str(value.get(nested_key) or "").strip() == music_id:
+                    return True
+        return False
+
+    @staticmethod
+    def _mapping_has_original_source_flag(payload: dict[str, object]) -> bool:
+        for key, value in payload.items():
+            lowered = key.lower()
+            if any(token in lowered for token in ("original", "origin", "source")) and value not in (None, "", False, [], {}):
+                return True
+        return False
+
+    def _score_music_source_candidate(
+        self,
+        *,
+        path: str,
+        music_match: bool,
+        has_direct_url: bool,
+        has_author_handle: bool,
+        has_original_flag: bool,
+    ) -> int:
+        score = 0
+        if music_match:
+            score += 90
+        if has_direct_url:
+            score += 40
+        if has_author_handle:
+            score += 20
+        if has_original_flag:
+            score += 140
+        if self._path_suggests_original_source(path):
+            score += 180
+        if self._path_suggests_related_candidate(path):
+            score -= 70
+        return score
+
+    @staticmethod
+    def _path_suggests_original_source(path: str) -> bool:
+        lowered = path.lower()
+        return any(token in lowered for token in ("original", "origin", "source", "mvinfo", "mv_info"))
+
+    @staticmethod
+    def _path_suggests_related_candidate(path: str) -> bool:
+        lowered = path.lower()
+        return any(token in lowered for token in ("related", "recommend", "reflow", "feed", "card", "list"))
+
+    @staticmethod
+    def _build_tiktok_video_url(video_id: str, author_handle: str | None) -> str:
+        if author_handle:
+            return f"https://www.tiktok.com/@{author_handle}/video/{video_id}"
+        return f"https://www.tiktok.com/embed/v2/{video_id}"
 
     @staticmethod
     def _resolve_resource_id(canonical_url: str, info: dict[str, object], resource_type: TikTokResourceType) -> str:

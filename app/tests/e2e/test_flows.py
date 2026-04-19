@@ -226,7 +226,8 @@ async def test_tiktok_music_only_flow(service_harness) -> None:
     )
     assert len(service_harness.gateway.sent_video_receipts) == 0
     assert len(service_harness.gateway.sent_audio_receipts) == 2
-    assert service_harness.provider.audio_download_calls["tiktok:music_only:777777"] == 1
+    assert service_harness.provider.download_calls["tiktok:music_only:777777"] == 1
+    assert service_harness.provider.audio_download_calls["tiktok:music_only:777777"] == 0
 
 
 async def test_invalid_cached_audio_file_id_rebuilds_music_only_request(service_harness) -> None:
@@ -245,8 +246,25 @@ async def test_invalid_cached_audio_file_id_rebuilds_music_only_request(service_
         IncomingMessage(chat_id=2, user_id=3031, message_id=211, chat_type="private", text=url)
     )
 
-    assert service_harness.provider.audio_download_calls[normalized_key] == 2
+    assert service_harness.provider.download_calls[normalized_key] == 2
+    assert service_harness.provider.audio_download_calls[normalized_key] == 0
     assert len(service_harness.gateway.sent_audio_receipts) == 2
+
+
+async def test_tiktok_music_only_uses_direct_audio_last_resort_when_source_video_is_unavailable(service_harness) -> None:
+    url = "https://www.tiktok.com/music/original-sound-989898"
+    normalized_key = "tiktok:music_only:989898"
+    service_harness.provider.music_source_video_missing_keys.add(normalized_key)
+
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=3040, message_id=212, chat_type="private", text=url)
+    )
+
+    assert handled is True
+    assert len(service_harness.gateway.sent_video_receipts) == 0
+    assert len(service_harness.gateway.sent_audio_receipts) == 1
+    assert service_harness.provider.download_calls[normalized_key] == 0
+    assert service_harness.provider.audio_download_calls[normalized_key] == 1
 
 
 async def test_unsupported_url_flow_returns_user_message(service_harness) -> None:
