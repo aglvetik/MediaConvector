@@ -180,12 +180,14 @@ class MediaPipelineService:
     ) -> OwnerPipelineResult:
         metadata = await provider.fetch_metadata(request.normalized_resource)
         photo_paths = await provider.download_images(request.normalized_resource, work_dir)
-        audio_path = await provider.download_audio(request.normalized_resource, work_dir)
+        audio_expected = metadata.has_audio is not False
+        audio_path = await provider.download_audio(request.normalized_resource, work_dir) if audio_expected else None
         media_result = await self._delivery_service.deliver_photo_post_uploads(
             request,
             photo_paths,
             audio_path,
-            missing_audio_notice=messages.NO_AUDIO_TRACK,
+            audio_expected=audio_expected,
+            missing_audio_notice=messages.NO_AUDIO_TRACK if audio_expected else None,
         )
         cache_entry = await self._cache_service.save_photo_delivery_result(
             resource=request.normalized_resource,
@@ -322,16 +324,41 @@ class MediaPipelineService:
         if metadata is not None and metadata.has_audio is False:
             return None, messages.NO_AUDIO_TRACK
         audio_path = work_dir / f"{request.normalized_resource.resource_id}.mp3"
+        log_event(
+            self._logger,
+            20,
+            "media_audio_extraction_started",
+            request_id=request.request_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+        )
         try:
-            return (
-                await self._ffmpeg_adapter.extract_audio(
-                    video_path,
-                    audio_path,
-                    normalized_key=request.normalized_resource.normalized_key,
-                ),
-                None,
+            extracted = await self._ffmpeg_adapter.extract_audio(
+                video_path,
+                audio_path,
+                normalized_key=request.normalized_resource.normalized_key,
             )
+            log_event(
+                self._logger,
+                20,
+                "media_audio_extraction_finished",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                success=True,
+            )
+            return extracted, None
         except AudioExtractionError as exc:
+            log_event(
+                self._logger,
+                30,
+                "media_audio_extraction_finished",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                success=False,
+                error_code=exc.error_code,
+            )
             if exc.error_code == "no_audio_track":
                 return None, messages.NO_AUDIO_TRACK
             log_event(

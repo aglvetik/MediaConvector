@@ -22,9 +22,10 @@ from app.infrastructure.persistence.sqlite import (
     SqlAlchemyProcessedMessageRepository,
     SqlAlchemyRequestLogRepository,
 )
+from app.domain.enums.platform import Platform
 from app.infrastructure.persistence.sqlite.base import Base
 from app.infrastructure.temp import TempFileManager
-from app.tests.fakes import FakeFfmpegAdapter, FakeGateway, FakeProvider
+from app.tests.fakes import FakeFfmpegAdapter, FakeGateway, FakeGenericProvider, FakeProvider
 
 
 @pytest_asyncio.fixture
@@ -46,6 +47,7 @@ class ServiceHarness:
     process_message_service: ProcessMessageService
     gateway: FakeGateway
     provider: FakeProvider
+    generic_providers: dict[Platform, FakeGenericProvider]
     ffmpeg: FakeFfmpegAdapter
     temp_manager: TempFileManager
     cache_repository: SqlAlchemyCacheRepository
@@ -61,6 +63,17 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
     processed_message_repository = SqlAlchemyProcessedMessageRepository(database)
     gateway = FakeGateway()
     provider = FakeProvider()
+    generic_providers = {
+        platform: FakeGenericProvider(platform)
+        for platform in (
+            Platform.YOUTUBE,
+            Platform.INSTAGRAM,
+            Platform.FACEBOOK,
+            Platform.PINTEREST,
+            Platform.RUTUBE,
+            Platform.LIKEE,
+        )
+    }
     ffmpeg = FakeFfmpegAdapter()
     metrics = MetricsService()
     cache_service = CacheService(cache_repository)
@@ -77,7 +90,7 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
         metrics_service=metrics,
     )
     process_message_service = ProcessMessageService(
-        providers=(provider,),
+        providers=(provider, *generic_providers.values()),
         delivery_service=delivery_service,
         media_pipeline_service=media_pipeline_service,
         rate_limit_service=RateLimitService(enabled=True, requests_per_minute=10),
@@ -93,6 +106,7 @@ async def service_harness(database: Database, tmp_path: Path) -> ServiceHarness:
         process_message_service=process_message_service,
         gateway=gateway,
         provider=provider,
+        generic_providers=generic_providers,
         ffmpeg=ffmpeg,
         temp_manager=temp_manager,
         cache_repository=cache_repository,

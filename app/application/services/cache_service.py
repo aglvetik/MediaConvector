@@ -72,7 +72,7 @@ class CacheService:
             previous_entry=previous_entry,
             audio_receipt=audio_receipt,
         )
-        status = CacheStatus.READY if source_has_audio and audio_receipt is not None else CacheStatus.PARTIAL
+        status = CacheStatus.READY if not source_has_audio or audio_receipt is not None else CacheStatus.PARTIAL
         entry = CacheEntry(
             id=previous_entry.id if previous_entry else None,
             platform=resource.platform,
@@ -125,7 +125,7 @@ class CacheService:
             previous_entry=previous_entry,
             audio_receipt=audio_receipt,
         )
-        status = CacheStatus.READY if source_has_audio and audio_receipt is not None else CacheStatus.PARTIAL
+        status = CacheStatus.READY if not source_has_audio or audio_receipt is not None else CacheStatus.PARTIAL
         entry = CacheEntry(
             id=previous_entry.id if previous_entry else None,
             platform=resource.platform,
@@ -237,7 +237,7 @@ class CacheService:
             video_size_bytes=previous_entry.video_size_bytes,
             audio_size_bytes=audio_receipt.size_bytes if audio_receipt else None,
             has_audio=source_has_audio,
-            status=CacheStatus.READY if source_has_audio and audio_receipt is not None else CacheStatus.PARTIAL,
+            status=CacheStatus.READY if not source_has_audio or audio_receipt is not None else CacheStatus.PARTIAL,
             is_valid=True,
             cache_version=previous_entry.cache_version,
             hit_count=previous_entry.hit_count,

@@ -9,7 +9,7 @@ def determine_cache_status(*, video_sent: bool, audio_requested: bool, audio_sen
         return CacheStatus.READY
     if audio_requested and not audio_sent:
         return CacheStatus.PARTIAL
-    return CacheStatus.PARTIAL
+    return CacheStatus.READY
 
 
 def determine_delivery_status(*, video_sent: bool, audio_requested: bool, audio_sent: bool) -> DeliveryStatus:
@@ -20,4 +20,3 @@ def determine_delivery_status(*, video_sent: bool, audio_requested: bool, audio_
     if audio_requested and not audio_sent:
         return DeliveryStatus.PARTIAL
     return DeliveryStatus.SENT_VIDEO
-

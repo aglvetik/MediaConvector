@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from app.domain.entities.media_result import DeliveryReceipt, MediaMetadata
 from app.domain.entities.normalized_resource import NormalizedResource
@@ -15,6 +16,7 @@ from app.domain.errors import (
     TelegramDeliveryError,
 )
 from app.domain.policies import build_cache_key
+from app.infrastructure.providers.source_detection import detect_source_type, extract_first_supported_url
 from app.infrastructure.providers.tiktok.url_utils import (
     extract_first_tiktok_url,
     extract_music_id,
@@ -101,6 +103,95 @@ class FakeProvider:
         if not self.has_audio[normalized.normalized_key]:
             return None
         path = work_dir / f"{normalized.resource_id}.m4a"
+        path.write_bytes(b"audio-bytes")
+        return path
+
+    async def download_images(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, ...]:
+        self.image_download_calls[normalized.normalized_key] += 1
+        paths: list[Path] = []
+        for index, _ in enumerate(normalized.image_urls, start=1):
+            path = work_dir / f"{normalized.resource_id}-{index}.jpg"
+            path.write_bytes(f"image-{index}".encode("utf-8"))
+            paths.append(path)
+        return tuple(paths)
+
+
+class FakeGenericProvider:
+    def __init__(self, platform: Platform) -> None:
+        self.platform_name = platform.value
+        self._platform = platform
+        self.download_calls: dict[str, int] = defaultdict(int)
+        self.audio_download_calls: dict[str, int] = defaultdict(int)
+        self.image_download_calls: dict[str, int] = defaultdict(int)
+
+    def extract_first_url(self, text: str) -> str | None:
+        return extract_first_supported_url(text, self._platform)
+
+    def can_handle(self, url: str) -> bool:
+        return detect_source_type(url) == self._platform
+
+    async def normalize(self, url: str) -> NormalizedResource:
+        path = urlparse(url).path.strip("/")
+        resource_id = path.rsplit("/", 1)[-1] or "resource"
+        lowered = path.casefold()
+
+        if "gallery" in lowered or "photos" in lowered or "carousel" in lowered or "pin" in lowered:
+            resource_type = "photo_post"
+            photo_count = 1 if "single" in lowered else 3
+            image_urls = tuple(f"https://cdn.example/{resource_id}-{index}.jpg" for index in range(1, photo_count + 1))
+            audio_url = None
+        elif "audio" in lowered or "sound" in lowered:
+            resource_type = "music_only"
+            image_urls = ()
+            audio_url = f"https://cdn.example/{resource_id}.mp3"
+        else:
+            resource_type = "video"
+            image_urls = ()
+            audio_url = None
+
+        normalized_key = build_cache_key(self._platform, resource_type, resource_id)
+        return NormalizedResource(
+            platform=self._platform,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            normalized_key=normalized_key,
+            original_url=url,
+            canonical_url=url.split("?", 1)[0],
+            title=f"{self._platform.value}-{resource_type}",
+            author=f"{self._platform.value}-author",
+            audio_url=audio_url,
+            image_urls=image_urls,
+            duration_sec=60,
+        )
+
+    async def fetch_metadata(self, normalized: NormalizedResource) -> MediaMetadata:
+        if normalized.resource_type == "photo_post":
+            has_audio = False
+        elif normalized.resource_type == "music_only":
+            has_audio = True
+        else:
+            has_audio = True
+        return MediaMetadata(
+            title=normalized.title or "media",
+            duration_sec=60,
+            author=normalized.author or "author",
+            description="desc",
+            size_bytes=2048,
+            has_audio=has_audio,
+        )
+
+    async def download_video(self, normalized: NormalizedResource, work_dir: Path) -> Path:
+        self.download_calls[normalized.normalized_key] += 1
+        path = work_dir / f"{normalized.resource_id}.mp4"
+        path.write_bytes(b"video-bytes")
+        return path
+
+    async def download_audio(self, normalized: NormalizedResource, work_dir: Path) -> Path | None:
+        self.audio_download_calls[normalized.normalized_key] += 1
+        if normalized.resource_type == "photo_post":
+            return None
+        suffix = ".mp3" if normalized.resource_type == "music_only" else ".m4a"
+        path = work_dir / f"{normalized.resource_id}{suffix}"
         path.write_bytes(b"audio-bytes")
         return path
 

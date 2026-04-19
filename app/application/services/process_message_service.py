@@ -15,10 +15,11 @@ from app.application.services.user_request_guard_service import UserRequestGuard
 from app.domain.entities.media_request import MediaRequest
 from app.domain.entities.media_result import MediaResult
 from app.domain.entities.normalized_resource import NormalizedResource
-from app.domain.errors import AppError
+from app.domain.errors import AppError, UnsupportedUrlError
 from app.domain.interfaces.provider import DownloaderProvider
 from app.domain.interfaces.repositories import ProcessedMessageRepository, RequestLogRepository
 from app.infrastructure.logging import get_logger, log_event
+from app.infrastructure.providers import contains_any_url, extract_candidate_urls
 
 
 @dataclass(slots=True, frozen=True)
@@ -78,6 +79,16 @@ class ProcessMessageService:
                     user_id=incoming.user_id,
                     detected_url=detected_url,
                 )
+                log_event(
+                    self._logger,
+                    logging.INFO,
+                    "source_detected",
+                    request_id=request_id,
+                    chat_id=incoming.chat_id,
+                    user_id=incoming.user_id,
+                    source_type=provider.platform_name,
+                    detected_url=detected_url,
+                )
                 normalized = await provider.normalize(detected_url)
                 normalized_key = normalized.normalized_key
                 return await self._execute_flow(
@@ -87,6 +98,9 @@ class ProcessMessageService:
                     loading_text=messages.LOADING_MESSAGE,
                     pipeline_runner=lambda request: self._media_pipeline_service.process(request, provider),
                 )
+
+            if contains_any_url(incoming.text):
+                raise UnsupportedUrlError()
 
             return False
         except AppError as exc:
@@ -279,10 +293,10 @@ class ProcessMessageService:
                     )
 
     def _detect_provider(self, text: str) -> tuple[DownloaderProvider | None, str | None]:
-        for provider in self._providers:
-            detected_url = provider.extract_first_url(text)
-            if detected_url:
-                return provider, detected_url
+        for candidate_url in extract_candidate_urls(text):
+            for provider in self._providers:
+                if provider.can_handle(candidate_url):
+                    return provider, candidate_url
         return None, None
 
     async def _safe_send_user_message(self, chat_id: int, text: str, reply_to_message_id: int | None) -> None:

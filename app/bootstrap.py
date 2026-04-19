@@ -27,7 +27,8 @@ from app.infrastructure.persistence.sqlite import (
     SqlAlchemyProcessedMessageRepository,
     SqlAlchemyRequestLogRepository,
 )
-from app.infrastructure.providers import TikTokProvider
+from app.domain.enums.platform import Platform
+from app.infrastructure.providers import TikTokProvider, YtDlpUrlProvider
 from app.infrastructure.telegram import AiogramTelegramGateway
 from app.infrastructure.temp import TempFileManager
 from app.workers import CleanupWorker, HealthWorker
@@ -53,9 +54,19 @@ def build_container(settings: Settings) -> AppContainer:
     database = Database(settings.database_url)
     bot = Bot(token=settings.bot_token)
     gateway = AiogramTelegramGateway(bot=bot, max_file_size_bytes=settings.max_file_size_bytes)
+    cookies_file = settings.resolved_ytdlp_cookies_file
+
+    logger.info(
+        "cookies_path",
+        extra={
+            "path": str(cookies_file) if cookies_file is not None else None,
+        },
+    )
     logger.info(
         "startup_paths",
         extra={
+            "cookies": str(cookies_file) if cookies_file is not None else None,
+            "cookies_exists": cookies_file.exists() if cookies_file is not None else False,
             "ffmpeg": settings.ffmpeg_path,
             "ytdlp": settings.ytdlp_path,
         },
@@ -74,6 +85,7 @@ def build_container(settings: Settings) -> AppContainer:
         binary_path=settings.ytdlp_path,
         timeout_seconds=settings.download_timeout_seconds,
         semaphore=download_semaphore,
+        cookies_file=cookies_file,
     )
     ffmpeg_adapter = FfmpegAdapter(
         ffmpeg_path=settings.ffmpeg_path,
@@ -81,6 +93,36 @@ def build_container(settings: Settings) -> AppContainer:
         semaphore=ffmpeg_semaphore,
     )
     tiktok_provider = TikTokProvider(
+        downloader=ytdlp_client,
+        request_timeout_seconds=settings.request_timeout_seconds,
+    )
+    youtube_provider = YtDlpUrlProvider(
+        platform=Platform.YOUTUBE,
+        downloader=ytdlp_client,
+        request_timeout_seconds=settings.request_timeout_seconds,
+    )
+    instagram_provider = YtDlpUrlProvider(
+        platform=Platform.INSTAGRAM,
+        downloader=ytdlp_client,
+        request_timeout_seconds=settings.request_timeout_seconds,
+    )
+    facebook_provider = YtDlpUrlProvider(
+        platform=Platform.FACEBOOK,
+        downloader=ytdlp_client,
+        request_timeout_seconds=settings.request_timeout_seconds,
+    )
+    pinterest_provider = YtDlpUrlProvider(
+        platform=Platform.PINTEREST,
+        downloader=ytdlp_client,
+        request_timeout_seconds=settings.request_timeout_seconds,
+    )
+    rutube_provider = YtDlpUrlProvider(
+        platform=Platform.RUTUBE,
+        downloader=ytdlp_client,
+        request_timeout_seconds=settings.request_timeout_seconds,
+    )
+    likee_provider = YtDlpUrlProvider(
+        platform=Platform.LIKEE,
         downloader=ytdlp_client,
         request_timeout_seconds=settings.request_timeout_seconds,
     )
@@ -106,7 +148,15 @@ def build_container(settings: Settings) -> AppContainer:
         cooldown_seconds=settings.user_request_cooldown_seconds,
     )
     process_message_service = ProcessMessageService(
-        providers=(tiktok_provider,),
+        providers=(
+            tiktok_provider,
+            youtube_provider,
+            instagram_provider,
+            facebook_provider,
+            pinterest_provider,
+            rutube_provider,
+            likee_provider,
+        ),
         delivery_service=delivery_service,
         media_pipeline_service=media_pipeline_service,
         rate_limit_service=rate_limit_service,

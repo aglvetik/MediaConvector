@@ -30,15 +30,40 @@ class DeliveryService:
         await self._gateway.send_text(chat_id, text, reply_to_message_id)
 
     async def deliver_from_cache(self, request: MediaRequest, cache_entry: CacheEntry) -> MediaResult:
+        log_event(
+            self._logger,
+            20,
+            "telegram_delivery_started",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            cached=True,
+            resource_type=cache_entry.resource_type,
+        )
         if cache_entry.resource_type == "photo_post":
-            return await self._deliver_photo_post_from_cache(request, cache_entry)
-        if cache_entry.resource_type == "music_only":
-            return await self._deliver_primary_audio_from_cache(
+            result = await self._deliver_photo_post_from_cache(request, cache_entry)
+        elif cache_entry.resource_type == "music_only":
+            result = await self._deliver_primary_audio_from_cache(
                 request,
                 audio_file_id=cache_entry.audio_file_id,
                 has_audio=cache_entry.has_audio,
             )
-        return await self._deliver_video_from_cache(request, cache_entry)
+        else:
+            result = await self._deliver_video_from_cache(request, cache_entry)
+        log_event(
+            self._logger,
+            20,
+            "telegram_delivery_finished",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            cached=True,
+            resource_type=cache_entry.resource_type,
+            delivery_status=result.delivery_status.value,
+        )
+        return result
 
     async def deliver_uploads(
         self,
@@ -48,6 +73,17 @@ class DeliveryService:
         *,
         missing_audio_notice: str = messages.NO_AUDIO_TRACK,
     ) -> MediaResult:
+        log_event(
+            self._logger,
+            20,
+            "telegram_delivery_started",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            cached=False,
+            resource_type=request.normalized_resource.resource_type,
+        )
         log_event(
             self._logger,
             20,
@@ -78,7 +114,7 @@ class DeliveryService:
             audio_path,
             missing_audio_notice=missing_audio_notice,
         )
-        return self._build_result(
+        result = self._build_result(
             primary_sent=True,
             audio_requested=True,
             audio_receipt=audio_receipt,
@@ -86,6 +122,19 @@ class DeliveryService:
             notice=notice,
             video_receipt=video_receipt,
         )
+        log_event(
+            self._logger,
+            20,
+            "telegram_delivery_finished",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            cached=False,
+            resource_type=request.normalized_resource.resource_type,
+            delivery_status=result.delivery_status.value,
+        )
+        return result
 
     async def deliver_photo_post_uploads(
         self,
@@ -93,26 +142,54 @@ class DeliveryService:
         photo_paths: tuple[Path, ...],
         audio_path: Path | None,
         *,
-        missing_audio_notice: str = messages.NO_AUDIO_TRACK,
+        audio_expected: bool = True,
+        missing_audio_notice: str | None = messages.NO_AUDIO_TRACK,
     ) -> MediaResult:
+        log_event(
+            self._logger,
+            20,
+            "telegram_delivery_started",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            cached=False,
+            resource_type=request.normalized_resource.resource_type,
+        )
         photo_receipts = await self._send_photo_group_with_fallback(
             request,
             photo_paths=photo_paths,
             cached=False,
         )
-        audio_receipt, notice = await self._send_optional_audio_upload(
-            request,
-            audio_path,
-            missing_audio_notice=missing_audio_notice,
-        )
-        return self._build_result(
+        audio_receipt: DeliveryReceipt | None = None
+        notice: str | None = None
+        if audio_expected:
+            audio_receipt, notice = await self._send_optional_audio_upload(
+                request,
+                audio_path,
+                missing_audio_notice=missing_audio_notice,
+            )
+        result = self._build_result(
             primary_sent=bool(photo_receipts),
-            audio_requested=True,
+            audio_requested=audio_expected,
             audio_receipt=audio_receipt,
             cache_hit=False,
             notice=notice,
             photo_receipts=photo_receipts,
         )
+        log_event(
+            self._logger,
+            20,
+            "telegram_delivery_finished",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            cached=False,
+            resource_type=request.normalized_resource.resource_type,
+            delivery_status=result.delivery_status.value,
+        )
+        return result
 
     async def deliver_audio_only(
         self,
@@ -127,15 +204,39 @@ class DeliveryService:
         failure_notice: str = messages.SEPARATE_AUDIO_SEND_FAILED,
         cache_hit: bool = False,
     ) -> MediaResult:
+        log_event(
+            self._logger,
+            20,
+            "telegram_delivery_started",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            cached=cache_hit,
+            resource_type=request.normalized_resource.resource_type,
+        )
         if audio_path is None:
             await self._gateway.send_text(request.chat_id, missing_audio_notice, request.message_id)
-            return self._build_result(
+            result = self._build_result(
                 primary_sent=primary_delivered,
                 audio_requested=True,
                 audio_receipt=None,
                 cache_hit=cache_hit,
                 notice=missing_audio_notice,
             )
+            log_event(
+                self._logger,
+                20,
+                "telegram_delivery_finished",
+                request_id=request.request_id,
+                chat_id=request.chat_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                cached=cache_hit,
+                resource_type=request.normalized_resource.resource_type,
+                delivery_status=result.delivery_status.value,
+            )
+            return result
 
         try:
             log_event(
@@ -168,29 +269,68 @@ class DeliveryService:
         except AppError as exc:
             notice = exc.user_message or failure_notice
             await self._gateway.send_text(request.chat_id, notice, request.message_id)
-            return self._build_result(
+            result = self._build_result(
                 primary_sent=primary_delivered,
                 audio_requested=True,
                 audio_receipt=None,
                 cache_hit=cache_hit,
                 notice=notice,
             )
+            log_event(
+                self._logger,
+                20,
+                "telegram_delivery_finished",
+                request_id=request.request_id,
+                chat_id=request.chat_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                cached=cache_hit,
+                resource_type=request.normalized_resource.resource_type,
+                delivery_status=result.delivery_status.value,
+            )
+            return result
         except Exception:
             await self._gateway.send_text(request.chat_id, failure_notice, request.message_id)
-            return self._build_result(
+            result = self._build_result(
                 primary_sent=primary_delivered,
                 audio_requested=True,
                 audio_receipt=None,
                 cache_hit=cache_hit,
                 notice=failure_notice,
             )
+            log_event(
+                self._logger,
+                20,
+                "telegram_delivery_finished",
+                request_id=request.request_id,
+                chat_id=request.chat_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                cached=cache_hit,
+                resource_type=request.normalized_resource.resource_type,
+                delivery_status=result.delivery_status.value,
+            )
+            return result
 
-        return self._build_result(
+        result = self._build_result(
             primary_sent=True,
             audio_requested=True,
             audio_receipt=audio_receipt,
             cache_hit=cache_hit,
         )
+        log_event(
+            self._logger,
+            20,
+            "telegram_delivery_finished",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            cached=cache_hit,
+            resource_type=request.normalized_resource.resource_type,
+            delivery_status=result.delivery_status.value,
+        )
+        return result
 
     async def deliver_audio_from_cache(
         self,
@@ -261,6 +401,14 @@ class DeliveryService:
             photo_file_ids=cache_entry.photo_file_ids,
             cached=True,
         )
+        if not cache_entry.has_audio:
+            return self._build_result(
+                primary_sent=bool(photo_receipts),
+                audio_requested=False,
+                audio_receipt=None,
+                cache_hit=True,
+                photo_receipts=photo_receipts,
+            )
         audio_receipt, notice = await self._send_optional_audio_from_cache(
             request,
             cache_entry,
@@ -394,19 +542,20 @@ class DeliveryService:
         request: MediaRequest,
         audio_path: Path | None,
         *,
-        missing_audio_notice: str,
+        missing_audio_notice: str | None,
     ) -> tuple[DeliveryReceipt | None, str | None]:
         if audio_path is None:
-            await self._gateway.send_text(request.chat_id, missing_audio_notice, request.message_id)
-            log_event(
-                self._logger,
-                20,
-                "partial_delivery",
-                request_id=request.request_id,
-                normalized_key=request.normalized_resource.normalized_key,
-                reason="audio_not_delivered",
-                notice=missing_audio_notice,
-            )
+            if missing_audio_notice is not None:
+                await self._gateway.send_text(request.chat_id, missing_audio_notice, request.message_id)
+                log_event(
+                    self._logger,
+                    20,
+                    "partial_delivery",
+                    request_id=request.request_id,
+                    normalized_key=request.normalized_resource.normalized_key,
+                    reason="audio_not_delivered",
+                    notice=missing_audio_notice,
+                )
             return None, missing_audio_notice
 
         try:
@@ -470,6 +619,7 @@ class DeliveryService:
     ) -> tuple[DeliveryReceipt, ...]:
         if not photo_paths and not photo_file_ids:
             return ()
+        total_items = len(photo_paths or photo_file_ids)
 
         log_event(
             self._logger,
@@ -479,8 +629,37 @@ class DeliveryService:
             chat_id=request.chat_id,
             normalized_key=request.normalized_resource.normalized_key,
             cached=cached,
-            photo_count=len(photo_paths or photo_file_ids),
+            photo_count=total_items,
         )
+        if total_items == 1:
+            if cached:
+                receipts = (
+                    await self._gateway.send_photo_by_file_id(
+                        request.chat_id,
+                        photo_file_ids[0],
+                        reply_to_message_id=request.message_id,
+                    ),
+                )
+            else:
+                receipts = (
+                    await self._gateway.send_photo_by_upload(
+                        request.chat_id,
+                        photo_paths[0],
+                        reply_to_message_id=request.message_id,
+                    ),
+                )
+            log_event(
+                self._logger,
+                20,
+                "telegram_send_photo_group_finished",
+                request_id=request.request_id,
+                chat_id=request.chat_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                cached=cached,
+                fallback=False,
+                photo_count=1,
+            )
+            return receipts
         try:
             if cached:
                 receipts = await self._gateway.send_photo_group_by_file_id(

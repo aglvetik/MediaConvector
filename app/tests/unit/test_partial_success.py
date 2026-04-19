@@ -12,3 +12,7 @@ def test_ready_status_when_video_and_audio_sent() -> None:
     assert determine_cache_status(video_sent=True, audio_requested=True, audio_sent=True) == CacheStatus.READY
     assert determine_delivery_status(video_sent=True, audio_requested=True, audio_sent=True) == DeliveryStatus.SENT_ALL
 
+
+def test_ready_status_when_secondary_audio_not_requested() -> None:
+    assert determine_cache_status(video_sent=True, audio_requested=False, audio_sent=False) == CacheStatus.READY
+    assert determine_delivery_status(video_sent=True, audio_requested=False, audio_sent=False) == DeliveryStatus.SENT_VIDEO

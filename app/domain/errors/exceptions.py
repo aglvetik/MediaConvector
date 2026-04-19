@@ -17,7 +17,7 @@ class AppError(Exception):
 
 
 class UnsupportedUrlError(AppError):
-    def __init__(self, message: str = "Unsupported or missing TikTok URL.") -> None:
+    def __init__(self, message: str = "Unsupported or missing media URL.") -> None:
         super().__init__(message=message, user_message=messages.INVALID_TIKTOK_LINK, error_code="unsupported_url")
 
 
