@@ -113,7 +113,7 @@ class GalleryDlClient:
         except TimeoutError as exc:
             raise DownloadError("gallery-dl command timed out.", temporary=True) from exc
         except OSError as exc:
-            raise DownloadError("gallery-dl command failed to start.", temporary=False, context={"error": str(exc)}) from exc
+            raise DownloadError("gallery-dl command failed to start.", temporary=True, context={"error": str(exc)}) from exc
 
         stdout_text = stdout_bytes.decode("utf-8", errors="replace")
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")

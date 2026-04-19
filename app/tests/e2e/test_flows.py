@@ -139,6 +139,8 @@ async def test_audio_extraction_failure_recovers_on_next_cached_request(service_
     assert first_cache_entry is not None
     assert first_cache_entry.has_audio is True
     assert first_cache_entry.audio_file_id is None
+    assert len(service_harness.gateway.sent_video_receipts) == 1
+    assert len(service_harness.gateway.sent_audio_receipts) == 0
     assert service_harness.gateway.text_messages[-1].text == messages.AUDIO_EXTRACTION_FAILED
 
     service_harness.ffmpeg.fail_keys.clear()
@@ -227,6 +229,26 @@ async def test_tiktok_music_only_flow(service_harness) -> None:
     assert service_harness.provider.audio_download_calls["tiktok:music_only:777777"] == 1
 
 
+async def test_invalid_cached_audio_file_id_rebuilds_music_only_request(service_harness) -> None:
+    url = "https://www.tiktok.com/music/original-sound-979797"
+    normalized_key = "tiktok:music_only:979797"
+
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=3030, message_id=210, chat_type="private", text=url)
+    )
+    cache_entry = await service_harness.cache_service.get_entry(normalized_key)
+    assert cache_entry is not None
+    assert cache_entry.audio_file_id is not None
+
+    service_harness.gateway.invalid_file_ids.add(cache_entry.audio_file_id)
+    await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=2, user_id=3031, message_id=211, chat_type="private", text=url)
+    )
+
+    assert service_harness.provider.audio_download_calls[normalized_key] == 2
+    assert len(service_harness.gateway.sent_audio_receipts) == 2
+
+
 async def test_unsupported_url_flow_returns_user_message(service_harness) -> None:
     handled = await service_harness.process_message_service.handle_message(
         IncomingMessage(chat_id=1, user_id=401, message_id=23, chat_type="private", text="https://example.com/resource")
@@ -305,7 +327,7 @@ async def test_gallery_with_all_broken_entries_fails_cleanly(service_harness) ->
 
     assert handled is True
     assert len(service_harness.gateway.sent_photo_receipts) == 0
-    assert service_harness.gateway.text_messages[-1].text == messages.VIDEO_UNAVAILABLE
+    assert service_harness.gateway.text_messages[-1].text == messages.TEMPORARY_DOWNLOAD_ERROR
 
 
 async def test_visual_post_with_optional_audio_failure_still_sends_images(service_harness) -> None:

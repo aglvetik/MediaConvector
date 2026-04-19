@@ -81,3 +81,25 @@ async def test_gallery_provider_falls_back_to_download_first_normalization_when_
     assert normalized.engine_name == "gallery-dl"
     assert normalized.image_entries == ()
     assert normalized.image_urls == ()
+
+
+@pytest.mark.asyncio
+async def test_gallery_provider_logs_initialized_artifact_when_probe_did_not_expose_images(monkeypatch) -> None:
+    provider = GalleryDlUrlProvider(
+        platform=Platform.PINTEREST,
+        downloader=BrokenGalleryDownloader(),
+        request_timeout_seconds=10,
+    )
+    events: list[str] = []
+
+    def fake_log_event(logger, level, event_name, **fields) -> None:
+        del logger, level, fields
+        events.append(event_name)
+
+    monkeypatch.setattr("app.infrastructure.providers.gallerydl_provider.log_event", fake_log_event)
+
+    normalized = await provider.normalize("https://www.pinterest.com/pin/pin-download-first-logged/")
+
+    assert normalized.resource_type == "photo_post"
+    assert "gallery_artifact_initialized" in events
+    assert "gallery_artifact_built" not in events

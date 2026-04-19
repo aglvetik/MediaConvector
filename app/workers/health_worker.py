@@ -39,6 +39,7 @@ class HealthWorker:
                         temp_dir_ok=report.temp_dir_ok,
                         ffmpeg_ok=report.ffmpeg_ok,
                         ytdlp_ok=report.ytdlp_ok,
+                        gallerydl_ok=report.gallerydl_ok,
                         bot_ready=report.bot_ready,
                         stuck_jobs=report.stuck_jobs,
                         temp_dir_size_bytes=report.temp_dir_size_bytes,

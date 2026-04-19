@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
 from aiogram import Bot
 
@@ -18,7 +21,7 @@ from app.application.services import (
 )
 from app.config import Settings
 from app.infrastructure.downloaders import GalleryDlClient, YtDlpClient
-from app.infrastructure.logging import get_logger
+from app.infrastructure.logging import get_logger, log_event
 from app.infrastructure.media import FfmpegAdapter
 from app.infrastructure.persistence.sqlite import (
     Database,
@@ -51,26 +54,39 @@ class AppContainer:
 
 def build_container(settings: Settings) -> AppContainer:
     logger = get_logger(__name__)
+    resolved_binaries = _validate_required_binaries(settings, logger)
     database = Database(settings.database_url)
     bot = Bot(token=settings.bot_token)
     gateway = AiogramTelegramGateway(bot=bot, max_file_size_bytes=settings.max_file_size_bytes)
     cookies_file = settings.resolved_ytdlp_cookies_file
 
-    logger.info(
+    log_event(
+        logger,
+        logging.INFO,
         "cookies_path",
-        extra={
-            "path": str(cookies_file) if cookies_file is not None else None,
-        },
+        cookies_file_path=str(cookies_file) if cookies_file is not None else None,
+        cookies_enabled=cookies_file is not None and cookies_file.exists(),
+        cookies_exists=cookies_file.exists() if cookies_file is not None else False,
     )
-    logger.info(
+    if cookies_file is not None and not cookies_file.exists():
+        log_event(
+            logger,
+            logging.WARNING,
+            "cookies_missing",
+            cookies_file_path=str(cookies_file),
+        )
+    log_event(
+        logger,
+        logging.INFO,
         "startup_paths",
-        extra={
-            "cookies": str(cookies_file) if cookies_file is not None else None,
-            "cookies_exists": cookies_file.exists() if cookies_file is not None else False,
-            "ffmpeg": settings.ffmpeg_path,
-            "ytdlp": settings.ytdlp_path,
-            "gallerydl": settings.gallerydl_path,
-        },
+        cookies=str(cookies_file) if cookies_file is not None else None,
+        cookies_exists=cookies_file.exists() if cookies_file is not None else False,
+        ffmpeg_configured=settings.ffmpeg_path,
+        ffmpeg_resolved=resolved_binaries["ffmpeg"],
+        ytdlp_configured=settings.ytdlp_path,
+        ytdlp_resolved=resolved_binaries["yt-dlp"],
+        gallerydl_configured=settings.gallerydl_path,
+        gallerydl_resolved=resolved_binaries["gallery-dl"],
     )
 
     cache_repository = SqlAlchemyCacheRepository(database)
@@ -83,19 +99,19 @@ def build_container(settings: Settings) -> AppContainer:
     ffmpeg_semaphore = asyncio.Semaphore(settings.max_parallel_ffmpeg)
 
     ytdlp_client = YtDlpClient(
-        binary_path=settings.ytdlp_path,
+        binary_path=resolved_binaries["yt-dlp"],
         timeout_seconds=settings.download_timeout_seconds,
         semaphore=download_semaphore,
         cookies_file=cookies_file,
     )
     gallerydl_client = GalleryDlClient(
-        binary_path=settings.gallerydl_path,
+        binary_path=resolved_binaries["gallery-dl"],
         timeout_seconds=settings.download_timeout_seconds,
         semaphore=download_semaphore,
         cookies_file=cookies_file,
     )
     ffmpeg_adapter = FfmpegAdapter(
-        ffmpeg_path=settings.ffmpeg_path,
+        ffmpeg_path=resolved_binaries["ffmpeg"],
         timeout_seconds=settings.request_timeout_seconds,
         semaphore=ffmpeg_semaphore,
     )
@@ -228,9 +244,9 @@ def build_container(settings: Settings) -> AppContainer:
         request_log_repository=request_log_repository,
         temp_file_manager=temp_file_manager,
         telegram_gateway=gateway,
-        ffmpeg_path=settings.ffmpeg_path,
-        ytdlp_path=settings.ytdlp_path,
-        gallerydl_path=settings.gallerydl_path,
+        ffmpeg_path=resolved_binaries["ffmpeg"],
+        ytdlp_path=resolved_binaries["yt-dlp"],
+        gallerydl_path=resolved_binaries["gallery-dl"],
         job_stale_after_minutes=settings.job_stale_after_minutes,
     )
     cleanup_worker = CleanupWorker(
@@ -253,3 +269,52 @@ def build_container(settings: Settings) -> AppContainer:
         cleanup_worker=cleanup_worker,
         health_worker=health_worker,
     )
+
+
+def _validate_required_binaries(settings: Settings, logger) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    required_binaries = {
+        "ffmpeg": settings.ffmpeg_path,
+        "yt-dlp": settings.ytdlp_path,
+        "gallery-dl": settings.gallerydl_path,
+    }
+    missing: list[str] = []
+    for binary_name, configured_path in required_binaries.items():
+        resolved_path = _resolve_binary_path(configured_path)
+        log_event(
+            logger,
+            logging.INFO,
+            "startup_binary_check",
+            binary_name=binary_name,
+            configured_path=configured_path,
+            resolved_path=resolved_path,
+            available=resolved_path is not None,
+        )
+        if resolved_path is None:
+            missing.append(binary_name)
+            continue
+        resolved[binary_name] = resolved_path
+
+    if missing:
+        missing_text = ", ".join(missing)
+        raise RuntimeError(f"Required runtime dependencies are missing: {missing_text}")
+
+    log_event(
+        logger,
+        logging.INFO,
+        "startup_binary_check_finished",
+        ffmpeg_path=resolved["ffmpeg"],
+        ytdlp_path=resolved["yt-dlp"],
+        gallerydl_path=resolved["gallery-dl"],
+    )
+    return resolved
+
+
+def _resolve_binary_path(configured_path: str) -> str | None:
+    candidate = Path(configured_path).expanduser()
+    if candidate.is_file():
+        return str(candidate.resolve())
+    resolved = shutil.which(configured_path)
+    if resolved is None:
+        return None
+    return str(Path(resolved).resolve())

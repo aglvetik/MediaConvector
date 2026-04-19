@@ -237,7 +237,7 @@ class YtDlpUrlProvider:
             if _is_image_path(downloaded):
                 paths.append(downloaded)
         if not paths:
-            raise DownloadError("No gallery images could be downloaded.", temporary=False)
+            raise DownloadError("No gallery images could be downloaded.", temporary=True)
         return tuple(paths)
 
     def _build_artifact(self, original_url: str, info: dict[str, object]) -> SourceMediaArtifact | None:

@@ -317,7 +317,7 @@ class DeliveryService:
                 performer=performer,
                 duration_sec=duration_sec,
                 thumbnail_used=thumbnail_path is not None,
-                filename=filename,
+                audio_filename=filename,
             )
             log_event(
                 self._logger,
@@ -578,7 +578,7 @@ class DeliveryService:
             performer=performer,
             duration_sec=request.normalized_resource.duration_sec,
             thumbnail_used=False,
-            filename=None,
+            audio_filename=None,
         )
         log_event(
             self._logger,
@@ -634,7 +634,7 @@ class DeliveryService:
                     performer=request.normalized_resource.author,
                     duration_sec=cache_entry.duration_sec or request.normalized_resource.duration_sec,
                     thumbnail_used=False,
-                    filename=None,
+                    audio_filename=None,
                 )
             except InvalidCachedMediaError as exc:
                 preserved_context = {
@@ -726,7 +726,7 @@ class DeliveryService:
                 performer=performer,
                 duration_sec=duration_sec,
                 thumbnail_used=thumbnail_path is not None,
-                filename=filename,
+                audio_filename=filename,
             )
             log_event(
                 self._logger,

@@ -118,6 +118,7 @@ class TikTokProvider:
                     cleaned_url=cleaned_url,
                 )
 
+            resource_type_hint = self._resolve_resource_type_hint(cleaned_url)
             info: dict[str, object] = {}
             try:
                 info = await self._downloader.probe_url(cleaned_url)
@@ -133,12 +134,12 @@ class TikTokProvider:
                 )
                 info = {}
 
-            resource_type = self._resolve_resource_type(cleaned_url, info)
+            resource_type = resource_type_hint or self._resolve_resource_type(cleaned_url, info)
             resource_id = self._resolve_resource_id(cleaned_url, info, resource_type)
             canonical_url = cleaned_url
             if not resource_id:
                 canonical_url = sanitize_url(str(info.get("webpage_url") or cleaned_url))
-                resource_type = self._resolve_resource_type(canonical_url, info)
+                resource_type = resource_type_hint or self._resolve_resource_type(canonical_url, info)
                 resource_id = self._resolve_resource_id(canonical_url, info, resource_type)
             if not resource_id:
                 raise NormalizationError(
@@ -155,13 +156,25 @@ class TikTokProvider:
             title = self._extract_title(info, web_state)
             author = self._extract_author(info, web_state)
             duration_sec = self._extract_duration(info, web_state)
-            gallery_artifact = await self._build_gallery_artifact(
-                canonical_url=canonical_url,
-                resource_id=resource_id,
-                title=title,
-                author=author,
-                duration_sec=duration_sec,
-            )
+            gallery_artifact: SourceMediaArtifact | None = None
+            if resource_type == TikTokResourceType.PHOTO_POST:
+                gallery_artifact = await self._build_gallery_artifact(
+                    canonical_url=canonical_url,
+                    resource_id=resource_id,
+                    title=title,
+                    author=author,
+                    duration_sec=duration_sec,
+                )
+            elif self._gallery_downloader is not None:
+                log_event(
+                    self._logger,
+                    20,
+                    "tiktok_probe_skipped",
+                    canonical_url=canonical_url,
+                    resource_type=resource_type.value,
+                    skipped_engine="gallery-dl",
+                    reason="resource_type_routes_to_ytdlp",
+                )
             if gallery_artifact is not None and resource_type == TikTokResourceType.PHOTO_POST:
                 image_urls = gallery_artifact.image_sources
                 audio_url = audio_url or gallery_artifact.audio_source
@@ -173,11 +186,6 @@ class TikTokProvider:
             if resource_type == TikTokResourceType.PHOTO_POST and not image_urls and not allow_download_first_gallery:
                 raise NormalizationError(
                     "Photo post did not expose any images.",
-                    context={"url": original_url, "expanded_url": expanded_url, "cleaned_url": canonical_url},
-                )
-            if resource_type == TikTokResourceType.MUSIC_ONLY and audio_url is None:
-                raise NormalizationError(
-                    "TikTok music link did not expose an audio URL.",
                     context={"url": original_url, "expanded_url": expanded_url, "cleaned_url": canonical_url},
                 )
 
@@ -278,7 +286,11 @@ class TikTokProvider:
             log_event(
                 self._logger,
                 20,
-                "gallery_artifact_built" if len(image_urls) > 1 else "visual_artifact_built",
+                (
+                    "gallery_artifact_built"
+                    if len(image_urls) > 1
+                    else ("visual_artifact_built" if len(image_urls) == 1 else "gallery_artifact_initialized")
+                ),
                 normalized_key=normalized.normalized_key,
                 source_type=Platform.TIKTOK.value,
                 canonical_url=normalized.canonical_url,
@@ -293,14 +305,25 @@ class TikTokProvider:
 
     async def fetch_metadata(self, normalized: NormalizedResource) -> MediaMetadata:
         if normalized.resource_type == TikTokResourceType.MUSIC_ONLY.value:
-            return MediaMetadata(
-                title=normalized.title,
-                duration_sec=normalized.duration_sec,
-                author=normalized.author,
-                description=None,
-                size_bytes=None,
-                has_audio=True,
-            )
+            try:
+                return await self._downloader.fetch_metadata(normalized)
+            except DownloadError as exc:
+                log_event(
+                    self._logger,
+                    30,
+                    "tiktok_music_metadata_fallback",
+                    normalized_key=normalized.normalized_key,
+                    canonical_url=normalized.canonical_url,
+                    error_code=exc.error_code,
+                )
+                return MediaMetadata(
+                    title=normalized.title,
+                    duration_sec=normalized.duration_sec,
+                    author=normalized.author,
+                    description=None,
+                    size_bytes=None,
+                    has_audio=True,
+                )
         if normalized.resource_type == TikTokResourceType.PHOTO_POST.value:
             return MediaMetadata(
                 title=normalized.title,
@@ -321,7 +344,9 @@ class TikTokProvider:
             bundle = await self._ensure_gallery_bundle(normalized, work_dir)
             if bundle.audio_files:
                 return bundle.audio_files[0]
-            return None
+            return await self._download_audio_via_ytdlp(normalized, work_dir, allow_direct_fallback=normalized.audio_url is not None)
+        if normalized.resource_type == TikTokResourceType.MUSIC_ONLY.value:
+            return await self._download_audio_via_ytdlp(normalized, work_dir, allow_direct_fallback=normalized.audio_url is not None)
         if normalized.audio_url is None:
             return None
         extension = self._guess_extension(normalized.audio_url, default="m4a")
@@ -342,7 +367,7 @@ class TikTokProvider:
             if entry_index < 1 or entry_index > len(bundle.image_files):
                 raise DownloadError(
                     "Requested gallery entry is unavailable.",
-                    temporary=False,
+                    temporary=True,
                     context={"normalized_key": normalized.normalized_key, "entry_index": entry_index},
                 )
             return bundle.image_files[entry_index - 1]
@@ -363,7 +388,7 @@ class TikTokProvider:
             if not bundle.image_files:
                 raise DownloadError(
                     "gallery-dl did not download image files.",
-                    temporary=False,
+                    temporary=True,
                     context={"normalized_key": normalized.normalized_key},
                 )
             return bundle.image_files
@@ -380,6 +405,67 @@ class TikTokProvider:
 
     async def download_with_metadata(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, MediaMetadata]:
         return await self._downloader.download_video(normalized, work_dir)
+
+    async def _download_audio_via_ytdlp(
+        self,
+        normalized: NormalizedResource,
+        work_dir: Path,
+        *,
+        allow_direct_fallback: bool,
+    ) -> Path:
+        log_event(
+            self._logger,
+            20,
+            "media_download_started",
+            normalized_key=normalized.normalized_key,
+            source_type=Platform.TIKTOK.value,
+            canonical_url=normalized.canonical_url,
+            media_kind="audio",
+            engine_name="yt-dlp",
+        )
+        try:
+            path, _ = await self._downloader.download_audio(
+                normalized.canonical_url,
+                work_dir,
+                normalized_key=normalized.normalized_key,
+            )
+        except DownloadError as exc:
+            log_event(
+                self._logger,
+                30,
+                "media_download_failed",
+                normalized_key=normalized.normalized_key,
+                source_type=Platform.TIKTOK.value,
+                canonical_url=normalized.canonical_url,
+                media_kind="audio",
+                engine_name="yt-dlp",
+                error_code=exc.error_code,
+            )
+            if not allow_direct_fallback or normalized.audio_url is None:
+                raise
+            log_event(
+                self._logger,
+                20,
+                "tiktok_audio_direct_fallback_started",
+                normalized_key=normalized.normalized_key,
+                canonical_url=normalized.canonical_url,
+                audio_source_url=normalized.audio_url,
+            )
+            extension = self._guess_extension(normalized.audio_url, default="m4a")
+            path = work_dir / f"{normalized.resource_id}-audio.{extension}"
+            await self._download_binary(normalized.audio_url, path)
+        log_event(
+            self._logger,
+            20,
+            "media_download_finished",
+            normalized_key=normalized.normalized_key,
+            source_type=Platform.TIKTOK.value,
+            canonical_url=normalized.canonical_url,
+            media_kind="audio",
+            engine_name="yt-dlp",
+            file_path=str(path),
+        )
+        return path
 
     async def _build_gallery_artifact(
         self,
@@ -595,6 +681,17 @@ class TikTokProvider:
         if self._looks_like_music_only(info):
             return TikTokResourceType.MUSIC_ONLY
         return TikTokResourceType.VIDEO
+
+    @staticmethod
+    def _resolve_resource_type_hint(canonical_url: str) -> TikTokResourceType | None:
+        path = urlparse(canonical_url).path.lower()
+        if "/music/" in path:
+            return TikTokResourceType.MUSIC_ONLY
+        if "/photo/" in path:
+            return TikTokResourceType.PHOTO_POST
+        if "/video/" in path:
+            return TikTokResourceType.VIDEO
+        return None
 
     @staticmethod
     def _resolve_media_kind(resource_type: TikTokResourceType, image_urls: tuple[str, ...]) -> str:

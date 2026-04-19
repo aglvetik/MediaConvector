@@ -24,6 +24,7 @@ This project now uses two download engines on purpose:
 In practice:
 
 - TikTok video posts -> `yt-dlp`
+- TikTok music URLs -> `yt-dlp`
 - TikTok photo/slideshow posts -> `gallery-dl`
 - YouTube video URLs -> `yt-dlp`
 - Instagram reels/videos -> `yt-dlp`
@@ -47,9 +48,16 @@ In practice:
 - Gallery/slideshow posts
   - prepares valid entries only
   - skips broken gallery items when it can still deliver the remaining images
+  - keeps visuals as the primary delivery target even when separate audio is unavailable
 - Audio-only URLs
   - sends Telegram audio
   - passes title, performer, duration, and thumbnail when available
+
+TikTok specifics:
+
+- TikTok `/music/...` links are handled as direct audio-only URLs through `yt-dlp`
+- TikTok `/photo/...` slideshow posts are handled as visual-first downloads through `gallery-dl`
+- separate audio for TikTok video/photo content is best-effort optional, not guaranteed
 
 ## What It Does Not Do
 
@@ -79,6 +87,8 @@ Key runtime stages:
 4. normalize the result into a shared artifact
 5. deliver video, photo, gallery, or audio through one Telegram delivery layer
 6. reuse cached Telegram `file_id` values when possible
+
+On startup, the bot validates `ffmpeg`, `yt-dlp`, and `gallery-dl` and fails fast if a required binary cannot be resolved.
 
 ## Requirements
 
@@ -256,6 +266,8 @@ journalctl -u tiktok-downloader-bot -f
 - Cookies are optional and only relevant for some direct extractor flows.
 - `yt-dlp` is kept focused on video/audio-first extraction.
 - `gallery-dl` is used for photo/gallery/slideshow extraction where that path is more stable.
+- TikTok music links are handled as audio-only URLs through `yt-dlp`.
+- Separate audio for video/photo content is best-effort: primary video or visuals are still sent when optional audio preparation fails.
 - Temporary files are cleaned after processing and by the cleanup worker.
 - SQLite is suitable for a small VPS, but not for larger multi-process deployments.
 

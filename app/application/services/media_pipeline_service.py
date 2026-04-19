@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import httpx
 
@@ -40,6 +41,18 @@ class PreparedAudioAsset:
     duration_sec: int | None
     thumbnail_path: Path | None
     filename: str
+
+
+@dataclass(slots=True)
+class PreparedAudioResult:
+    status: Literal["prepared", "not_available", "failed_non_fatal", "failed_fatal"]
+    asset: PreparedAudioAsset | None = None
+    notice: str | None = None
+    error_code: str | None = None
+
+    @property
+    def is_prepared(self) -> bool:
+        return self.status == "prepared" and self.asset is not None
 
 
 class MediaPipelineService:
@@ -169,7 +182,7 @@ class MediaPipelineService:
     ) -> OwnerPipelineResult:
         metadata = await provider.fetch_metadata(request.normalized_resource)
         video_path = await provider.download_video(request.normalized_resource, work_dir)
-        prepared_audio, audio_notice = await self._prepare_audio_from_video(
+        audio_result = await self._prepare_audio_from_video(
             request,
             video_path,
             metadata,
@@ -178,13 +191,13 @@ class MediaPipelineService:
         media_result = await self._delivery_service.deliver_uploads(
             request,
             video_path,
-            prepared_audio.file_path if prepared_audio is not None else None,
-            audio_title=prepared_audio.title if prepared_audio is not None else None,
-            audio_performer=prepared_audio.performer if prepared_audio is not None else None,
-            audio_duration_sec=prepared_audio.duration_sec if prepared_audio is not None else None,
-            audio_thumbnail_path=prepared_audio.thumbnail_path if prepared_audio is not None else None,
-            audio_filename=prepared_audio.filename if prepared_audio is not None else None,
-            missing_audio_notice=audio_notice or messages.NO_AUDIO_TRACK,
+            audio_result.asset.file_path if audio_result.is_prepared else None,
+            audio_title=audio_result.asset.title if audio_result.is_prepared else None,
+            audio_performer=audio_result.asset.performer if audio_result.is_prepared else None,
+            audio_duration_sec=audio_result.asset.duration_sec if audio_result.is_prepared else None,
+            audio_thumbnail_path=audio_result.asset.thumbnail_path if audio_result.is_prepared else None,
+            audio_filename=audio_result.asset.filename if audio_result.is_prepared else None,
+            missing_audio_notice=audio_result.notice or messages.NO_AUDIO_TRACK,
         )
         cache_entry = await self._cache_service.save_delivery_result(
             resource=request.normalized_resource,
@@ -209,22 +222,35 @@ class MediaPipelineService:
                 if request.normalized_resource.has_expected_audio is not None
                 else metadata.has_audio is not False
             )
-            prepared_audio: PreparedAudioAsset | None = None
+            audio_result = PreparedAudioResult(status="not_available")
             missing_audio_notice: str | None = None
             if audio_expected:
                 try:
                     source_audio_path = await provider.download_audio(request.normalized_resource, work_dir)
                     if source_audio_path is None:
-                        missing_audio_notice = messages.NO_AUDIO_TRACK
+                        audio_result = PreparedAudioResult(
+                            status="not_available",
+                            notice=messages.NO_AUDIO_TRACK,
+                            error_code="no_audio_track",
+                        )
                     else:
-                        prepared_audio = await self._prepare_audio_delivery_asset(
+                        audio_result = await self._prepare_audio_delivery_asset(
                             request=request,
                             metadata=metadata,
                             source_path=source_audio_path,
                             work_dir=work_dir,
+                            fatal_on_failure=False,
+                            missing_notice=messages.NO_AUDIO_TRACK,
+                            failure_notice=messages.SEPARATE_AUDIO_SEND_FAILED,
                             fallback_cover_path=photo_paths[0] if photo_paths else None,
                         )
                 except Exception as exc:
+                    audio_result = PreparedAudioResult(
+                        status="failed_non_fatal",
+                        notice=messages.SEPARATE_AUDIO_SEND_FAILED,
+                        error_code=getattr(exc, "error_code", "download_failed"),
+                    )
+                if audio_result.status in {"failed_non_fatal", "failed_fatal"}:
                     log_event(
                         self._logger,
                         30,
@@ -232,20 +258,20 @@ class MediaPipelineService:
                         request_id=request.request_id,
                         normalized_key=request.normalized_resource.normalized_key,
                         source_type=request.normalized_resource.platform.value,
-                        error_code=getattr(exc, "error_code", "download_failed"),
+                        error_code=audio_result.error_code or "audio_prepare_failed",
                     )
-                    missing_audio_notice = messages.SEPARATE_AUDIO_SEND_FAILED
+                missing_audio_notice = audio_result.notice
             media_result = await self._delivery_service.deliver_photo_post_uploads(
                 request,
                 photo_paths,
-                prepared_audio.file_path if prepared_audio is not None else None,
+                audio_result.asset.file_path if audio_result.is_prepared else None,
                 audio_expected=audio_expected,
                 missing_audio_notice=missing_audio_notice,
-                audio_title=prepared_audio.title if prepared_audio is not None else None,
-                audio_performer=prepared_audio.performer if prepared_audio is not None else None,
-                audio_duration_sec=prepared_audio.duration_sec if prepared_audio is not None else None,
-                audio_thumbnail_path=prepared_audio.thumbnail_path if prepared_audio is not None else None,
-                audio_filename=prepared_audio.filename if prepared_audio is not None else None,
+                audio_title=audio_result.asset.title if audio_result.is_prepared else None,
+                audio_performer=audio_result.asset.performer if audio_result.is_prepared else None,
+                audio_duration_sec=audio_result.asset.duration_sec if audio_result.is_prepared else None,
+                audio_thumbnail_path=audio_result.asset.thumbnail_path if audio_result.is_prepared else None,
+                audio_filename=audio_result.asset.filename if audio_result.is_prepared else None,
             )
             cache_entry = await self._cache_service.save_photo_delivery_result(
                 resource=request.normalized_resource,
@@ -275,23 +301,31 @@ class MediaPipelineService:
             normalized_key=request.normalized_resource.normalized_key,
         )
         source_audio_path = await provider.download_audio(request.normalized_resource, work_dir)
-        prepared_audio = None
-        if source_audio_path is not None:
-            prepared_audio = await self._prepare_audio_delivery_asset(
+        if source_audio_path is None:
+            audio_result = PreparedAudioResult(
+                status="failed_fatal",
+                notice=messages.TEMPORARY_DOWNLOAD_ERROR,
+                error_code="audio_not_available",
+            )
+        else:
+            audio_result = await self._prepare_audio_delivery_asset(
                 request=request,
                 metadata=metadata,
                 source_path=source_audio_path,
                 work_dir=work_dir,
+                fatal_on_failure=True,
+                missing_notice=messages.TEMPORARY_DOWNLOAD_ERROR,
+                failure_notice=messages.TEMPORARY_DOWNLOAD_ERROR,
             )
         media_result = await self._delivery_service.deliver_audio_only(
             request,
-            prepared_audio.file_path if prepared_audio is not None else None,
-            missing_audio_notice=messages.NO_AUDIO_TRACK,
-            title=prepared_audio.title if prepared_audio is not None else None,
-            performer=prepared_audio.performer if prepared_audio is not None else None,
-            duration_sec=prepared_audio.duration_sec if prepared_audio is not None else None,
-            thumbnail_path=prepared_audio.thumbnail_path if prepared_audio is not None else None,
-            filename=prepared_audio.filename if prepared_audio is not None else None,
+            audio_result.asset.file_path if audio_result.is_prepared else None,
+            missing_audio_notice=audio_result.notice or messages.TEMPORARY_DOWNLOAD_ERROR,
+            title=audio_result.asset.title if audio_result.is_prepared else None,
+            performer=audio_result.asset.performer if audio_result.is_prepared else None,
+            duration_sec=audio_result.asset.duration_sec if audio_result.is_prepared else None,
+            thumbnail_path=audio_result.asset.thumbnail_path if audio_result.is_prepared else None,
+            filename=audio_result.asset.filename if audio_result.is_prepared else None,
         )
         if media_result.audio_receipt is not None:
             cache_entry = await self._cache_service.save_audio_only_result(
@@ -347,29 +381,32 @@ class MediaPipelineService:
         work_dir = await self._temp_file_manager.create_work_dir(f"{request.request_id}-audio")
         try:
             metadata = await provider.fetch_metadata(request.normalized_resource)
-            prepared_audio: PreparedAudioAsset | None = None
+            audio_result = PreparedAudioResult(status="not_available")
             if request.normalized_resource.resource_type == "video":
                 video_path = await provider.download_video(request.normalized_resource, work_dir)
-                prepared_audio, _ = await self._prepare_audio_from_video(request, video_path, metadata, work_dir)
+                audio_result = await self._prepare_audio_from_video(request, video_path, metadata, work_dir)
             else:
                 source_audio_path = await provider.download_audio(request.normalized_resource, work_dir)
                 if source_audio_path is not None:
-                    prepared_audio = await self._prepare_audio_delivery_asset(
+                    audio_result = await self._prepare_audio_delivery_asset(
                         request=request,
                         metadata=metadata,
                         source_path=source_audio_path,
                         work_dir=work_dir,
+                        fatal_on_failure=False,
+                        missing_notice=messages.NO_AUDIO_TRACK,
+                        failure_notice=messages.SEPARATE_AUDIO_SEND_FAILED,
                     )
             result = await self._delivery_service.deliver_audio_only(
                 request,
-                prepared_audio.file_path if prepared_audio is not None else None,
-                missing_audio_notice=messages.NO_AUDIO_TRACK,
+                audio_result.asset.file_path if audio_result.is_prepared else None,
+                missing_audio_notice=audio_result.notice or messages.NO_AUDIO_TRACK,
                 primary_delivered=True,
-                title=prepared_audio.title if prepared_audio is not None else None,
-                performer=prepared_audio.performer if prepared_audio is not None else None,
-                duration_sec=prepared_audio.duration_sec if prepared_audio is not None else None,
-                thumbnail_path=prepared_audio.thumbnail_path if prepared_audio is not None else None,
-                filename=prepared_audio.filename if prepared_audio is not None else None,
+                title=audio_result.asset.title if audio_result.is_prepared else None,
+                performer=audio_result.asset.performer if audio_result.is_prepared else None,
+                duration_sec=audio_result.asset.duration_sec if audio_result.is_prepared else None,
+                thumbnail_path=audio_result.asset.thumbnail_path if audio_result.is_prepared else None,
+                filename=audio_result.asset.filename if audio_result.is_prepared else None,
             )
             cache_entry = await self._cache_service.save_audio_refresh(
                 resource=request.normalized_resource,
@@ -408,9 +445,13 @@ class MediaPipelineService:
         work_dir: Path,
         *,
         fallback_cover_path: Path | None = None,
-    ) -> tuple[PreparedAudioAsset | None, str | None]:
+    ) -> PreparedAudioResult:
         if metadata is not None and metadata.has_audio is False:
-            return None, messages.NO_AUDIO_TRACK
+            return PreparedAudioResult(
+                status="not_available",
+                notice=messages.NO_AUDIO_TRACK,
+                error_code="no_audio_track",
+            )
         log_event(
             self._logger,
             20,
@@ -419,37 +460,27 @@ class MediaPipelineService:
             normalized_key=request.normalized_resource.normalized_key,
             source_type=request.normalized_resource.platform.value,
         )
-        try:
-            prepared = await self._prepare_audio_delivery_asset(
-                request=request,
-                metadata=metadata,
-                source_path=video_path,
-                work_dir=work_dir,
-                fallback_cover_path=fallback_cover_path,
-            )
-            log_event(
-                self._logger,
-                20,
-                "media_audio_extraction_finished",
-                request_id=request.request_id,
-                normalized_key=request.normalized_resource.normalized_key,
-                source_type=request.normalized_resource.platform.value,
-                success=True,
-            )
-            return prepared, None
-        except AudioExtractionError as exc:
-            log_event(
-                self._logger,
-                30,
-                "media_audio_extraction_finished",
-                request_id=request.request_id,
-                normalized_key=request.normalized_resource.normalized_key,
-                source_type=request.normalized_resource.platform.value,
-                success=False,
-                error_code=exc.error_code,
-            )
-            if exc.error_code == "no_audio_track":
-                return None, messages.NO_AUDIO_TRACK
+        result = await self._prepare_audio_delivery_asset(
+            request=request,
+            metadata=metadata,
+            source_path=video_path,
+            work_dir=work_dir,
+            fatal_on_failure=False,
+            missing_notice=messages.NO_AUDIO_TRACK,
+            failure_notice=messages.AUDIO_EXTRACTION_FAILED,
+            fallback_cover_path=fallback_cover_path,
+        )
+        log_event(
+            self._logger,
+            20 if result.is_prepared else 30,
+            "media_audio_extraction_finished",
+            request_id=request.request_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            success=result.is_prepared,
+            error_code=result.error_code,
+        )
+        if result.status == "failed_non_fatal":
             log_event(
                 self._logger,
                 30,
@@ -457,9 +488,9 @@ class MediaPipelineService:
                 request_id=request.request_id,
                 normalized_key=request.normalized_resource.normalized_key,
                 reason="audio_extract_failed",
-                error_code=exc.error_code,
+                error_code=result.error_code,
             )
-            return None, messages.AUDIO_EXTRACTION_FAILED
+        return result
 
     async def _prepare_visual_entries(
         self,
@@ -471,7 +502,7 @@ class MediaPipelineService:
             log_event(
                 self._logger,
                 20,
-                "gallery_artifact_built",
+                "gallery_artifact_initialized",
                 request_id=request.request_id,
                 normalized_key=request.normalized_resource.normalized_key,
                 source_type=request.normalized_resource.platform.value,
@@ -508,7 +539,7 @@ class MediaPipelineService:
             if not normalized_paths:
                 raise DownloadError(
                     "No visual entries could be prepared for delivery.",
-                    temporary=False,
+                    temporary=True,
                     context={
                         "normalized_key": request.normalized_resource.normalized_key,
                         "image_count": len(raw_paths),
@@ -617,7 +648,7 @@ class MediaPipelineService:
         if not normalized_paths:
             raise DownloadError(
                 "No visual entries could be prepared for delivery.",
-                temporary=False,
+                temporary=True,
                 context={
                     "normalized_key": request.normalized_resource.normalized_key,
                     "image_count": len(entries),
@@ -709,6 +740,56 @@ class MediaPipelineService:
         metadata: MediaMetadata | None,
         source_path: Path,
         work_dir: Path,
+        fatal_on_failure: bool,
+        missing_notice: str,
+        failure_notice: str,
+        fallback_cover_path: Path | None = None,
+    ) -> PreparedAudioResult:
+        try:
+            asset = await self._build_audio_delivery_asset(
+                request=request,
+                metadata=metadata,
+                source_path=source_path,
+                work_dir=work_dir,
+                fallback_cover_path=fallback_cover_path,
+            )
+            return PreparedAudioResult(status="prepared", asset=asset)
+        except AudioExtractionError as exc:
+            result_status: Literal["not_available", "failed_non_fatal", "failed_fatal"]
+            if exc.error_code == "no_audio_track":
+                result_status = "failed_fatal" if fatal_on_failure else "not_available"
+                notice = messages.TEMPORARY_DOWNLOAD_ERROR if fatal_on_failure else missing_notice
+            else:
+                result_status = "failed_fatal" if fatal_on_failure else "failed_non_fatal"
+                notice = messages.TEMPORARY_DOWNLOAD_ERROR if fatal_on_failure else failure_notice
+            return PreparedAudioResult(
+                status=result_status,
+                notice=notice,
+                error_code=exc.error_code,
+            )
+        except Exception as exc:
+            log_event(
+                self._logger,
+                30,
+                "audio_prepare_failed",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                error_code=getattr(exc, "error_code", "audio_prepare_failed"),
+            )
+            return PreparedAudioResult(
+                status="failed_fatal" if fatal_on_failure else "failed_non_fatal",
+                notice=messages.TEMPORARY_DOWNLOAD_ERROR if fatal_on_failure else failure_notice,
+                error_code=getattr(exc, "error_code", "audio_prepare_failed"),
+            )
+
+    async def _build_audio_delivery_asset(
+        self,
+        *,
+        request: MediaRequest,
+        metadata: MediaMetadata | None,
+        source_path: Path,
+        work_dir: Path,
         fallback_cover_path: Path | None = None,
     ) -> PreparedAudioAsset:
         title = self._resolve_audio_title(request, metadata)
@@ -730,7 +811,7 @@ class MediaPipelineService:
             performer=performer,
             duration_sec=duration_sec,
             thumbnail_available=thumbnail_path is not None,
-            filename=filename,
+            audio_filename=filename,
         )
         output_path = work_dir / filename
         prepared = await self._ffmpeg_adapter.transcode_audio_to_mp3(
@@ -750,6 +831,7 @@ class MediaPipelineService:
             file_path=str(prepared),
             title=title,
             performer=performer,
+            audio_filename=filename,
         )
         return PreparedAudioAsset(
             file_path=prepared,

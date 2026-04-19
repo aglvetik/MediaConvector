@@ -94,6 +94,11 @@ class GalleryDlUrlProvider:
             has_expected_audio=artifact.has_expected_audio,
         )
         if normalized.resource_type == "photo_post":
+            artifact_event_name = (
+                "gallery_artifact_initialized"
+                if normalized.entry_count == 0
+                else ("gallery_artifact_built" if normalized.entry_count > 1 else "visual_artifact_built")
+            )
             log_event(
                 self._logger,
                 20,
@@ -105,7 +110,7 @@ class GalleryDlUrlProvider:
             log_event(
                 self._logger,
                 20,
-                "gallery_artifact_built" if normalized.entry_count > 1 else "visual_artifact_built",
+                artifact_event_name,
                 normalized_key=normalized.normalized_key,
                 source_type=self._platform.value,
                 canonical_url=normalized.canonical_url,
@@ -141,7 +146,7 @@ class GalleryDlUrlProvider:
         if not bundle.video_files:
             raise DownloadError(
                 "gallery-dl did not download a video file.",
-                temporary=False,
+                temporary=True,
                 context={"normalized_key": normalized.normalized_key},
             )
         return bundle.video_files[0]
@@ -165,7 +170,7 @@ class GalleryDlUrlProvider:
         if entry_index < 1 or entry_index > len(bundle.image_files):
             raise DownloadError(
                 "Requested gallery entry is unavailable.",
-                temporary=False,
+                temporary=True,
                 context={"normalized_key": normalized.normalized_key, "entry_index": entry_index},
             )
         return bundle.image_files[entry_index - 1]
@@ -175,7 +180,7 @@ class GalleryDlUrlProvider:
         if not bundle.image_files:
             raise DownloadError(
                 "gallery-dl did not download image files.",
-                temporary=False,
+                temporary=True,
                 context={"normalized_key": normalized.normalized_key},
             )
         return bundle.image_files

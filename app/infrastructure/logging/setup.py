@@ -5,6 +5,32 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+_RESERVED_LOG_RECORD_FIELDS = {
+    "args",
+    "asctime",
+    "created",
+    "exc_info",
+    "exc_text",
+    "filename",
+    "funcName",
+    "levelname",
+    "levelno",
+    "lineno",
+    "message",
+    "module",
+    "msecs",
+    "msg",
+    "name",
+    "pathname",
+    "process",
+    "processName",
+    "relativeCreated",
+    "stack_info",
+    "taskName",
+    "thread",
+    "threadName",
+}
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -17,29 +43,7 @@ class JsonFormatter(logging.Formatter):
         if hasattr(record, "event_name"):
             payload["event_name"] = getattr(record, "event_name")
         for key, value in record.__dict__.items():
-            if key.startswith("_") or key in {
-                "args",
-                "created",
-                "exc_info",
-                "exc_text",
-                "filename",
-                "funcName",
-                "levelname",
-                "levelno",
-                "lineno",
-                "module",
-                "msecs",
-                "message",
-                "msg",
-                "name",
-                "pathname",
-                "process",
-                "processName",
-                "relativeCreated",
-                "stack_info",
-                "thread",
-                "threadName",
-            }:
+            if key.startswith("_") or key in _RESERVED_LOG_RECORD_FIELDS:
                 continue
             payload[key] = value
         if record.exc_info:
@@ -61,5 +65,23 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def log_event(logger: logging.Logger, level: int, event_name: str, **fields: object) -> None:
-    logger.log(level, event_name, extra={"event_name": event_name, **fields})
+    extra_fields = {"event_name": event_name, **_sanitize_extra_fields(fields)}
+    try:
+        logger.log(level, event_name, extra=extra_fields)
+    except Exception:
+        try:
+            logging.Logger._log(logger, level, event_name, (), extra={"event_name": event_name})
+        except Exception:
+            pass
 
+
+def _sanitize_extra_fields(fields: dict[str, object]) -> dict[str, object]:
+    sanitized: dict[str, object] = {}
+    for key, value in fields.items():
+        safe_key = key
+        if safe_key in _RESERVED_LOG_RECORD_FIELDS or safe_key == "event_name":
+            safe_key = f"extra_{safe_key}"
+        while safe_key in _RESERVED_LOG_RECORD_FIELDS or safe_key == "event_name" or safe_key in sanitized:
+            safe_key = f"extra_{safe_key}"
+        sanitized[safe_key] = value
+    return sanitized

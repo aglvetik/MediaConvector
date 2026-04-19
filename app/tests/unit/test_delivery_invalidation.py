@@ -59,3 +59,59 @@ async def test_delivery_rethrows_invalid_cached_audio_with_video_sent_context() 
     with pytest.raises(InvalidCachedMediaError) as exc_info:
         await service.deliver_from_cache(request, cache_entry)
     assert exc_info.value.context["video_sent"] is True
+
+
+@pytest.mark.asyncio
+async def test_delivery_from_cache_sends_cached_audio_without_logging_collision() -> None:
+    gateway = FakeGateway()
+    service = DeliveryService(gateway)
+    request = MediaRequest(
+        request_id="r2",
+        chat_id=1,
+        user_id=1,
+        message_id=20,
+        chat_type="private",
+        message_text="text",
+        normalized_resource=NormalizedResource(
+            platform=Platform.TIKTOK,
+            resource_type="music_only",
+            resource_id="456",
+            normalized_key="tiktok:music_only:456",
+            original_url="https://www.tiktok.com/music/original-sound-456",
+            canonical_url="https://www.tiktok.com/music/original-sound-456",
+            title="Original sound",
+            author="Creator",
+            duration_sec=15,
+        ),
+    )
+    cache_entry = CacheEntry(
+        id=2,
+        platform=Platform.TIKTOK,
+        resource_type="music_only",
+        normalized_key="tiktok:music_only:456",
+        original_url=request.normalized_resource.original_url,
+        canonical_url=request.normalized_resource.canonical_url,
+        video_file_id=None,
+        audio_file_id="audio-ok",
+        photo_file_ids=(),
+        video_file_unique_id=None,
+        audio_file_unique_id="ua",
+        photo_file_unique_ids=(),
+        duration_sec=15,
+        video_size_bytes=None,
+        audio_size_bytes=100,
+        has_audio=True,
+        status=CacheStatus.READY,
+        is_valid=True,
+        cache_version=1,
+        hit_count=0,
+        created_at=None,
+        updated_at=None,
+        last_hit_at=None,
+    )
+
+    result = await service.deliver_from_cache(request, cache_entry)
+
+    assert result.audio_receipt is not None
+    assert gateway.sent_audio_requests[-1].title == "Original sound"
+    assert gateway.sent_audio_requests[-1].performer == "Creator"
