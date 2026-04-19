@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -49,6 +50,13 @@ _TIKTOK_BROWSER_HEADERS = {
 }
 
 
+@dataclass(slots=True, frozen=True)
+class _TikTokImageSelection:
+    url: str
+    source_field: str
+    fallback_fields_considered: bool
+
+
 class TikTokProvider:
     platform_name = Platform.TIKTOK.value
 
@@ -90,7 +98,8 @@ class TikTokProvider:
             raise NormalizationError("Could not extract TikTok resource id.", context={"url": original_url})
 
         web_state = await self._load_web_state(canonical_url if canonical_url.startswith("http") else resolved_url)
-        image_urls = tuple(self._extract_image_urls(info, web_state))
+        image_selections = tuple(self._extract_image_selections(info, web_state))
+        image_urls = tuple(selection.url for selection in image_selections)
         audio_url = self._extract_audio_url(info, web_state)
         video_url = self._extract_video_url(info)
         thumbnail_url = self._extract_thumbnail_url(info, web_state)
@@ -138,6 +147,18 @@ class TikTokProvider:
         )
         if resource_type == TikTokResourceType.PHOTO_POST:
             log_event(self._logger, 20, "tiktok_photo_post_detected", normalized_key=normalized.normalized_key)
+            for index, selection in enumerate(image_selections, start=1):
+                log_event(
+                    self._logger,
+                    10,
+                    "tiktok_photo_image_url_selected",
+                    normalized_key=normalized.normalized_key,
+                    canonical_url=normalized.canonical_url,
+                    image_index=index,
+                    image_source_field=selection.source_field,
+                    image_host=(urlparse(selection.url).hostname or "").lower(),
+                    fallback_fields_considered=selection.fallback_fields_considered,
+                )
             log_event(
                 self._logger,
                 20,
@@ -383,36 +404,265 @@ class TikTokProvider:
             return all(isinstance(item, dict) and item.get("vcodec") in {None, "none"} for item in formats)
         return False
 
-    def _extract_image_urls(self, info: dict[str, object], web_state: dict[str, object]) -> list[str]:
-        urls: list[str] = []
-        entries = info.get("entries")
-        if isinstance(entries, list):
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                candidate = self._extract_best_image_candidate(entry)
-                if candidate:
-                    urls.append(candidate)
-        urls.extend(self._find_image_urls_in_mapping(web_state))
+    def _extract_image_selections(
+        self,
+        info: dict[str, object],
+        web_state: dict[str, object],
+    ) -> list[_TikTokImageSelection]:
+        candidate_sets: list[list[_TikTokImageSelection]] = []
+        selections = self._extract_image_selections_from_entries(
+            info.get("entries"),
+            base_path="info.entries",
+            allow_fallback_fields=False,
+        )
+        if selections:
+            candidate_sets.append(self._dedupe_image_selections(selections))
+        for group_path, image_items in self._find_structured_image_groups(web_state):
+            selections = self._extract_image_selections_from_entries(
+                image_items,
+                base_path=group_path,
+                allow_fallback_fields=False,
+            )
+            if selections:
+                candidate_sets.append(self._dedupe_image_selections(selections))
+
+        if candidate_sets:
+            return max(candidate_sets, key=self._score_image_selection_set)
+
+        selections = self._extract_image_selections_from_entries(
+            info.get("entries"),
+            base_path="info.entries",
+            allow_fallback_fields=True,
+        )
+        if selections:
+            candidate_sets.append(self._dedupe_image_selections(selections))
+
+        for group_path, image_items in self._find_structured_image_groups(web_state):
+            selections = self._extract_image_selections_from_entries(
+                image_items,
+                base_path=group_path,
+                allow_fallback_fields=True,
+            )
+            if selections:
+                candidate_sets.append(self._dedupe_image_selections(selections))
+
+        if candidate_sets:
+            return max(candidate_sets, key=self._score_image_selection_set)
+
+        fallback_urls = [
+            self._normalize_image_url(url)
+            for url in self._find_image_urls_in_mapping(web_state)
+            if not self._is_broken_tiktok_image_host(urlparse(url).hostname or "")
+        ]
+        deduped_fallback_urls = self._dedupe_urls(fallback_urls)
+        return [
+            _TikTokImageSelection(
+                url=url,
+                source_field="web_state.regex_image_url_fallback",
+                fallback_fields_considered=True,
+            )
+            for url in deduped_fallback_urls
+        ]
+
+    def _extract_image_selections_from_entries(
+        self,
+        payload: object,
+        *,
+        base_path: str,
+        allow_fallback_fields: bool,
+    ) -> list[_TikTokImageSelection]:
+        if not isinstance(payload, list):
+            return []
+
+        selections: list[_TikTokImageSelection] = []
+        for index, item in enumerate(payload):
+            if not isinstance(item, dict):
+                continue
+            selection = self._select_image_entry_url(
+                item,
+                base_path=f"{base_path}[{index}]",
+                allow_fallback_fields=allow_fallback_fields,
+            )
+            if selection is None:
+                continue
+            selections.append(selection)
+        return selections
+
+    def _select_image_entry_url(
+        self,
+        item: dict[str, object],
+        *,
+        base_path: str,
+        allow_fallback_fields: bool,
+    ) -> _TikTokImageSelection | None:
+        candidate_specs: list[tuple[str, tuple[str, ...]]] = [
+            ("image_url.url_list", ("image_url", "url_list")),
+            ("image_url.urlList", ("image_url", "urlList")),
+            ("imageURL.urlList", ("imageURL", "urlList")),
+            ("imageURL.url_list", ("imageURL", "url_list")),
+            ("imageUrl.urlList", ("imageUrl", "urlList")),
+            ("imageUrl.url_list", ("imageUrl", "url_list")),
+            ("display_image.url_list", ("display_image", "url_list")),
+            ("display_image.urlList", ("display_image", "urlList")),
+            ("displayImage.urlList", ("displayImage", "urlList")),
+            ("displayImage.url_list", ("displayImage", "url_list")),
+            ("image.url_list", ("image", "url_list")),
+            ("image.urlList", ("image", "urlList")),
+            ("display_image", ("display_image",)),
+            ("displayImage", ("displayImage",)),
+            ("image", ("image",)),
+            ("imageURL", ("imageURL",)),
+            ("thumbnails", ("thumbnails",)),
+        ]
+        if allow_fallback_fields:
+            candidate_specs.extend(
+                [
+                    ("display_url", ("display_url",)),
+                    ("url", ("url",)),
+                ]
+            )
+
+        for source_field, path in candidate_specs:
+            urls = self._extract_urls_from_path(item, path)
+            candidate = self._choose_preferred_image_url(urls)
+            if candidate is None:
+                continue
+            return _TikTokImageSelection(
+                url=candidate,
+                source_field=f"{base_path}.{source_field}",
+                fallback_fields_considered=allow_fallback_fields,
+            )
+        return None
+
+    def _find_structured_image_groups(self, payload: object, *, path: str = "web_state") -> list[tuple[str, list[dict[str, object]]]]:
+        groups: list[tuple[str, list[dict[str, object]]]] = []
+        if isinstance(payload, dict):
+            image_post = payload.get("imagePost")
+            if isinstance(image_post, dict):
+                images = image_post.get("images")
+                if self._is_structured_image_list(images):
+                    groups.append((f"{path}.imagePost.images", images))
+            image_post_info = payload.get("image_post_info")
+            if isinstance(image_post_info, dict):
+                images = image_post_info.get("images")
+                if self._is_structured_image_list(images):
+                    groups.append((f"{path}.image_post_info.images", images))
+            images = payload.get("images")
+            if self._is_structured_image_list(images):
+                groups.append((f"{path}.images", images))
+            for key, value in payload.items():
+                groups.extend(self._find_structured_image_groups(value, path=f"{path}.{key}"))
+        elif isinstance(payload, list):
+            for index, item in enumerate(payload):
+                groups.extend(self._find_structured_image_groups(item, path=f"{path}[{index}]"))
+        return groups
+
+    @staticmethod
+    def _is_structured_image_list(payload: object) -> bool:
+        return (
+            isinstance(payload, list)
+            and bool(payload)
+            and all(isinstance(item, dict) for item in payload)
+            and any(
+                any(key in item for key in ("image_url", "imageURL", "imageUrl", "display_image", "displayImage", "image", "thumbnails", "url"))
+                for item in payload
+            )
+        )
+
+    def _extract_urls_from_path(self, payload: dict[str, object], path: tuple[str, ...]) -> tuple[str, ...]:
+        current: object = payload
+        for part in path:
+            if not isinstance(current, dict):
+                return ()
+            current = current.get(part)
+            if current is None:
+                return ()
+        return tuple(self._collect_url_candidates(current))
+
+    def _collect_url_candidates(self, payload: object) -> Iterable[str]:
+        if isinstance(payload, str):
+            if payload.startswith(("http://", "https://")):
+                yield payload
+            elif payload.startswith("//"):
+                yield f"https:{payload}"
+            return
+        if isinstance(payload, list):
+            for item in payload:
+                yield from self._collect_url_candidates(item)
+            return
+        if isinstance(payload, dict):
+            for key in ("url", "src"):
+                value = payload.get(key)
+                if isinstance(value, str):
+                    yield from self._collect_url_candidates(value)
+            for key in ("url_list", "urlList"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    yield from self._collect_url_candidates(value)
+            for key in ("image_url", "imageURL", "imageUrl", "image", "display_image", "displayImage", "display_url", "thumbnails"):
+                value = payload.get(key)
+                if value is not None:
+                    yield from self._collect_url_candidates(value)
+
+    def _choose_preferred_image_url(self, urls: Iterable[str]) -> str | None:
+        deduped_urls = self._dedupe_urls(self._normalize_image_url(url) for url in urls)
+        if not deduped_urls:
+            return None
+        return max(deduped_urls, key=self._score_image_url)
+
+    def _score_image_url(self, url: str) -> tuple[int, int]:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path.lower()
+        score = 0
+        if parsed.scheme == "https":
+            score += 40
+        elif parsed.scheme == "http":
+            score += 10
+        if "/obj/" in path:
+            score += 25
+        if any(marker in host for marker in ("tiktokcdn.com", "byteimg.com", "ibytedtos.com")):
+            score += 20
+        if self._is_broken_tiktok_image_host(host):
+            score -= 80
+        if any(path.endswith(f".{extension}") for extension in ("jpg", "jpeg", "png", "webp")):
+            score += 5
+        return score, -len(url)
+
+    @staticmethod
+    def _dedupe_urls(urls: Iterable[str]) -> list[str]:
         deduped: list[str] = []
         seen: set[str] = set()
         for url in urls:
-            sanitized = self._normalize_image_url(url.strip())
+            sanitized = url.strip()
             if not sanitized or sanitized in seen:
                 continue
             seen.add(sanitized)
             deduped.append(sanitized)
         return deduped
 
-    def _extract_best_image_candidate(self, entry: dict[str, object]) -> str | None:
-        for key in ("display_image", "displayImage", "image", "imageURL", "display_url", "url"):
-            candidate = self._pick_first_url(entry.get(key))
-            if candidate:
-                return self._normalize_image_url(candidate)
-        thumbnail_candidate = self._pick_first_url(entry.get("thumbnails"))
-        if thumbnail_candidate:
-            return self._normalize_image_url(thumbnail_candidate)
-        return None
+    def _dedupe_image_selections(self, selections: Iterable[_TikTokImageSelection]) -> list[_TikTokImageSelection]:
+        deduped: list[_TikTokImageSelection] = []
+        seen: set[str] = set()
+        for selection in selections:
+            if selection.url in seen:
+                continue
+            seen.add(selection.url)
+            deduped.append(selection)
+        return deduped
+
+    def _score_image_selection_set(self, selections: list[_TikTokImageSelection]) -> tuple[int, int, int]:
+        broken_hosts = sum(
+            1
+            for selection in selections
+            if self._is_broken_tiktok_image_host(urlparse(selection.url).hostname or "")
+        )
+        uses_fallback_fields = any(selection.fallback_fields_considered for selection in selections)
+        return (
+            len(selections),
+            0 if uses_fallback_fields else 1,
+            -broken_hosts,
+        )
 
     def _extract_audio_url(self, info: dict[str, object], web_state: dict[str, object]) -> str | None:
         formats = info.get("formats")
@@ -545,6 +795,8 @@ class TikTokProvider:
     @staticmethod
     def _normalize_image_url(url: str) -> str:
         cleaned = url.strip()
+        if cleaned.startswith("//"):
+            cleaned = f"https:{cleaned}"
         parsed = urlparse(cleaned)
         host = (parsed.hostname or "").lower()
         if cleaned.startswith("http://") and any(marker in host for marker in ("muscdn.com", "tiktokcdn.com", "byteimg.com")):
@@ -557,6 +809,11 @@ class TikTokProvider:
         if any(marker in host for marker in ("muscdn.com", "tiktokcdn.com", "byteimg.com")):
             return dict(_TIKTOK_BROWSER_HEADERS)
         return TikTokProvider._default_headers()
+
+    @staticmethod
+    def _is_broken_tiktok_image_host(host: str) -> bool:
+        lowered = host.lower()
+        return "muscdn.com" in lowered
 
 
 def _clean_text(value: str) -> str:

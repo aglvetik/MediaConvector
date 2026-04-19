@@ -17,14 +17,29 @@ class StubDownloader:
 
 
 @pytest.mark.asyncio
-async def test_tiktok_photo_normalization_upgrades_muscdn_http_to_https(monkeypatch) -> None:
+async def test_tiktok_photo_normalization_prefers_structured_image_url_list_over_raw_entry_url(monkeypatch) -> None:
     provider = TikTokProvider(
         downloader=StubDownloader(
             {
                 "id": "12345",
                 "entries": [
-                    {"url": "http://p16.muscdn.com/img/one~noop.webp"},
-                    {"display_image": "http://p16.muscdn.com/img/two~noop.webp"},
+                    {
+                        "url": "https://p16.muscdn.com/img/one~noop.webp",
+                        "image_url": {
+                            "url_list": [
+                                "https://p16-sign-va.tiktokcdn.com/obj/tos-maliva-p-0068/one.webp",
+                                "https://p16.muscdn.com/img/one~noop.webp",
+                            ]
+                        },
+                    },
+                    {
+                        "url": "https://p16.muscdn.com/img/two~noop.webp",
+                        "imageURL": {
+                            "urlList": [
+                                "https://p16-sign-va.tiktokcdn.com/obj/tos-maliva-p-0068/two.webp",
+                            ]
+                        },
+                    },
                 ],
             }
         ),
@@ -46,10 +61,68 @@ async def test_tiktok_photo_normalization_upgrades_muscdn_http_to_https(monkeypa
     assert normalized.resource_type == "photo_post"
     assert normalized.media_kind == "gallery"
     assert normalized.image_urls == (
-        "https://p16.muscdn.com/img/one~noop.webp",
-        "https://p16.muscdn.com/img/two~noop.webp",
+        "https://p16-sign-va.tiktokcdn.com/obj/tos-maliva-p-0068/one.webp",
+        "https://p16-sign-va.tiktokcdn.com/obj/tos-maliva-p-0068/two.webp",
     )
     assert tuple(entry.source_url for entry in normalized.image_entries) == normalized.image_urls
+    assert all("muscdn.com" not in image_url for image_url in normalized.image_urls)
+
+
+@pytest.mark.asyncio
+async def test_tiktok_photo_normalization_uses_structured_web_state_images_when_entries_only_have_raw_urls(monkeypatch) -> None:
+    provider = TikTokProvider(
+        downloader=StubDownloader(
+            {
+                "id": "54321",
+                "entries": [
+                    {"url": "https://p16.muscdn.com/img/one~noop.webp"},
+                    {"url": "https://p16.muscdn.com/img/two~noop.webp"},
+                ],
+            }
+        ),
+        request_timeout_seconds=10,
+    )
+
+    async def fake_resolve_short_url(url: str) -> str:
+        return url
+
+    async def fake_load_web_state(url: str) -> dict[str, object]:
+        return {
+            "ItemModule": {
+                "54321": {
+                    "imagePost": {
+                        "images": [
+                            {
+                                "imageURL": {
+                                    "urlList": [
+                                        "https://p16-sign-va.tiktokcdn.com/obj/tos-maliva-p-0068/three.webp",
+                                        "https://p16.muscdn.com/img/one~noop.webp",
+                                    ]
+                                }
+                            },
+                            {
+                                "imageURL": {
+                                    "urlList": [
+                                        "https://p16-sign-va.tiktokcdn.com/obj/tos-maliva-p-0068/four.webp",
+                                    ]
+                                }
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+
+    monkeypatch.setattr(provider, "_resolve_short_url", fake_resolve_short_url)
+    monkeypatch.setattr(provider, "_load_web_state", fake_load_web_state)
+
+    normalized = await provider.normalize("https://www.tiktok.com/@user/photo/54321")
+
+    assert normalized.image_urls == (
+        "https://p16-sign-va.tiktokcdn.com/obj/tos-maliva-p-0068/three.webp",
+        "https://p16-sign-va.tiktokcdn.com/obj/tos-maliva-p-0068/four.webp",
+    )
+    assert all("muscdn.com" not in image_url for image_url in normalized.image_urls)
 
 
 @pytest.mark.asyncio
