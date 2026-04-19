@@ -48,6 +48,8 @@ class DeliveryService:
                 request,
                 audio_file_id=cache_entry.audio_file_id,
                 has_audio=cache_entry.has_audio,
+                title=request.normalized_resource.title,
+                performer=request.normalized_resource.author,
             )
         else:
             result = await self._deliver_video_from_cache(request, cache_entry)
@@ -71,6 +73,11 @@ class DeliveryService:
         video_path: Path,
         audio_path: Path | None,
         *,
+        audio_title: str | None = None,
+        audio_performer: str | None = None,
+        audio_duration_sec: int | None = None,
+        audio_thumbnail_path: Path | None = None,
+        audio_filename: str | None = None,
         missing_audio_notice: str = messages.NO_AUDIO_TRACK,
     ) -> MediaResult:
         log_event(
@@ -113,6 +120,11 @@ class DeliveryService:
             request,
             audio_path,
             missing_audio_notice=missing_audio_notice,
+            title=audio_title,
+            performer=audio_performer,
+            duration_sec=audio_duration_sec,
+            thumbnail_path=audio_thumbnail_path,
+            filename=audio_filename,
         )
         result = self._build_result(
             primary_sent=True,
@@ -144,6 +156,11 @@ class DeliveryService:
         *,
         audio_expected: bool = True,
         missing_audio_notice: str | None = messages.NO_AUDIO_TRACK,
+        audio_title: str | None = None,
+        audio_performer: str | None = None,
+        audio_duration_sec: int | None = None,
+        audio_thumbnail_path: Path | None = None,
+        audio_filename: str | None = None,
     ) -> MediaResult:
         log_event(
             self._logger,
@@ -179,6 +196,11 @@ class DeliveryService:
                 request,
                 audio_path,
                 missing_audio_notice=missing_audio_notice,
+                title=audio_title,
+                performer=audio_performer,
+                duration_sec=audio_duration_sec,
+                thumbnail_path=audio_thumbnail_path,
+                filename=audio_filename,
             )
         result = self._build_result(
             primary_sent=bool(photo_receipts),
@@ -223,7 +245,9 @@ class DeliveryService:
         primary_delivered: bool = False,
         title: str | None = None,
         performer: str | None = None,
+        duration_sec: int | None = None,
         thumbnail_path: Path | None = None,
+        filename: str | None = None,
         failure_notice: str = messages.SEPARATE_AUDIO_SEND_FAILED,
         cache_hit: bool = False,
     ) -> MediaResult:
@@ -278,7 +302,22 @@ class DeliveryService:
                 request.message_id,
                 title=title,
                 performer=performer,
+                duration=duration_sec,
                 thumbnail_path=thumbnail_path,
+                filename=filename,
+            )
+            log_event(
+                self._logger,
+                20,
+                "telegram_audio_metadata_sent",
+                request_id=request.request_id,
+                chat_id=request.chat_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                title=title,
+                performer=performer,
+                duration_sec=duration_sec,
+                thumbnail_used=thumbnail_path is not None,
+                filename=filename,
             )
             log_event(
                 self._logger,
@@ -362,6 +401,7 @@ class DeliveryService:
         *,
         title: str | None = None,
         performer: str | None = None,
+        duration: int | None = None,
     ) -> MediaResult:
         audio_receipt = await self._gateway.send_audio_by_file_id(
             request.chat_id,
@@ -370,6 +410,7 @@ class DeliveryService:
             request.message_id,
             title=title,
             performer=performer,
+            duration=duration,
         )
         return self._build_result(
             primary_sent=True,
@@ -524,6 +565,20 @@ class DeliveryService:
             request.message_id,
             title=title,
             performer=performer,
+            duration=request.normalized_resource.duration_sec,
+        )
+        log_event(
+            self._logger,
+            20,
+            "telegram_audio_metadata_sent",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            title=title,
+            performer=performer,
+            duration_sec=request.normalized_resource.duration_sec,
+            thumbnail_used=False,
+            filename=None,
         )
         log_event(
             self._logger,
@@ -564,6 +619,22 @@ class DeliveryService:
                     cache_entry.audio_file_id,
                     messages.AUDIO_SUCCESS_CAPTION,
                     request.message_id,
+                    title=request.normalized_resource.title,
+                    performer=request.normalized_resource.author,
+                    duration=cache_entry.duration_sec or request.normalized_resource.duration_sec,
+                )
+                log_event(
+                    self._logger,
+                    20,
+                    "telegram_audio_metadata_sent",
+                    request_id=request.request_id,
+                    chat_id=request.chat_id,
+                    normalized_key=request.normalized_resource.normalized_key,
+                    title=request.normalized_resource.title,
+                    performer=request.normalized_resource.author,
+                    duration_sec=cache_entry.duration_sec or request.normalized_resource.duration_sec,
+                    thumbnail_used=False,
+                    filename=None,
                 )
             except InvalidCachedMediaError as exc:
                 preserved_context = {
@@ -603,6 +674,11 @@ class DeliveryService:
         audio_path: Path | None,
         *,
         missing_audio_notice: str | None,
+        title: str | None = None,
+        performer: str | None = None,
+        duration_sec: int | None = None,
+        thumbnail_path: Path | None = None,
+        filename: str | None = None,
     ) -> tuple[DeliveryReceipt | None, str | None]:
         if audio_path is None:
             if missing_audio_notice is not None:
@@ -633,6 +709,24 @@ class DeliveryService:
                 audio_path,
                 messages.AUDIO_SUCCESS_CAPTION,
                 request.message_id,
+                title=title,
+                performer=performer,
+                duration=duration_sec,
+                thumbnail_path=thumbnail_path,
+                filename=filename,
+            )
+            log_event(
+                self._logger,
+                20,
+                "telegram_audio_metadata_sent",
+                request_id=request.request_id,
+                chat_id=request.chat_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                title=title,
+                performer=performer,
+                duration_sec=duration_sec,
+                thumbnail_used=thumbnail_path is not None,
+                filename=filename,
             )
             log_event(
                 self._logger,

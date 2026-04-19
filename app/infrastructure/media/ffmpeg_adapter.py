@@ -116,6 +116,36 @@ class FfmpegAdapter:
                 raise AudioExtractionError("Thumbnail output file is empty.")
             return output_path
 
+    async def normalize_image_to_jpg(
+        self,
+        source_path: Path,
+        output_path: Path,
+        *,
+        normalized_key: str,
+    ) -> Path:
+        async with self._semaphore:
+            await self._run_ffmpeg(
+                [
+                    self._ffmpeg_path,
+                    "-nostdin",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(source_path),
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "2",
+                    str(output_path),
+                ],
+                normalized_key=normalized_key,
+                operation="normalize_image",
+            )
+            if not output_path.exists() or output_path.stat().st_size == 0:
+                raise AudioExtractionError("Normalized image output file is empty.")
+            return output_path
+
     async def _run_ffmpeg(self, command: list[str], *, normalized_key: str, operation: str) -> None:
         try:
             process = await asyncio.create_subprocess_exec(
@@ -135,7 +165,7 @@ class FfmpegAdapter:
         stderr_text = stderr.decode("utf-8", errors="ignore")
         if process.returncode != 0:
             lower = stderr_text.lower()
-            if operation == "extract_audio" and (
+            if operation in {"extract_audio", "transcode_audio"} and (
                 "output file is empty" in lower or "matches no streams" in lower or "does not contain any stream" in lower
             ):
                 raise AudioExtractionError("Source video has no audio track.", no_audio_track=True)

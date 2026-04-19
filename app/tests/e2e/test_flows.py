@@ -167,6 +167,26 @@ async def test_tiktok_photo_post_flow(service_harness) -> None:
     assert len(service_harness.gateway.sent_audio_receipts) == 1
 
 
+async def test_tiktok_photo_post_download_first_gallery_flow(service_harness) -> None:
+    normalized_key = "tiktok:photo_post:777700"
+    service_harness.provider.download_first_gallery_keys.add(normalized_key)
+    service_harness.provider.photo_counts[normalized_key] = 3
+
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(
+            chat_id=1,
+            user_id=399,
+            message_id=170,
+            chat_type="private",
+            text="https://www.tiktok.com/@user/photo/777700",
+        )
+    )
+
+    assert handled is True
+    assert len(service_harness.gateway.sent_photo_receipts) == 3
+    assert service_harness.provider.image_download_calls[normalized_key] == 1
+
+
 async def test_tiktok_photo_group_falls_back_to_sequential_photos(service_harness) -> None:
     service_harness.gateway.fail_photo_group_upload = True
     await service_harness.process_message_service.handle_message(
@@ -319,6 +339,22 @@ async def test_single_photo_source_sends_single_photo(service_harness) -> None:
     assert service_harness.gateway.text_messages == []
 
 
+async def test_download_first_gallery_images_are_converted_to_jpg_before_delivery(service_harness) -> None:
+    normalized_key = "pinterest:photo_post:single-webp-42"
+    provider = service_harness.generic_providers[Platform.PINTEREST]
+    provider.download_first_gallery_keys.add(normalized_key)
+    provider.photo_counts[normalized_key] = 1
+    provider.photo_extensions[normalized_key] = ("webp",)
+
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(chat_id=1, user_id=4060, message_id=281, chat_type="private", text="https://www.pinterest.com/pin/single-webp-42/")
+    )
+
+    assert handled is True
+    assert len(service_harness.gateway.sent_photo_paths) == 1
+    assert service_harness.gateway.sent_photo_paths[0].suffix.lower() == ".jpg"
+
+
 async def test_audio_only_source_flow(service_harness) -> None:
     url = "https://likee.video/@user/audio/audio-555"
     handled = await service_harness.process_message_service.handle_message(
@@ -328,6 +364,27 @@ async def test_audio_only_source_flow(service_harness) -> None:
     assert len(service_harness.gateway.sent_video_receipts) == 0
     assert len(service_harness.gateway.sent_audio_receipts) == 1
     assert service_harness.generic_providers[Platform.LIKEE].audio_download_calls["likee:music_only:audio-555"] == 1
+
+
+async def test_audio_delivery_includes_metadata_and_human_readable_filename(service_harness) -> None:
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(
+            chat_id=1,
+            user_id=4070,
+            message_id=290,
+            chat_type="private",
+            text="https://www.tiktok.com/@user/video/123456",
+        )
+    )
+
+    assert handled is True
+    audio_request = service_harness.gateway.sent_audio_requests[-1]
+    assert audio_request.title == "video"
+    assert audio_request.performer == "author"
+    assert audio_request.duration == 10
+    assert audio_request.filename is not None
+    assert audio_request.filename.endswith(".mp3")
+    assert "video" in audio_request.filename.lower()
 
 
 async def test_supported_url_later_in_message_is_processed(service_harness) -> None:

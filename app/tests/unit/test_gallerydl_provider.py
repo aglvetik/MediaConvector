@@ -16,6 +16,13 @@ class StubGalleryDownloader:
         return self._entries
 
 
+class BrokenGalleryDownloader:
+    async def probe_url(self, url: str) -> tuple[dict[str, object], ...]:
+        from app.domain.errors import DownloadError
+
+        raise DownloadError("probe failed", temporary=True)
+
+
 @pytest.mark.asyncio
 async def test_gallery_provider_normalizes_instagram_carousel() -> None:
     provider = GalleryDlUrlProvider(
@@ -58,3 +65,19 @@ async def test_gallery_provider_normalizes_single_pinterest_image() -> None:
     assert normalized.media_kind == "photo"
     assert normalized.entry_count == 1
     assert normalized.image_entries[0].source_url == "https://cdn.example/pin-1.png"
+
+
+@pytest.mark.asyncio
+async def test_gallery_provider_falls_back_to_download_first_normalization_when_probe_fails() -> None:
+    provider = GalleryDlUrlProvider(
+        platform=Platform.PINTEREST,
+        downloader=BrokenGalleryDownloader(),
+        request_timeout_seconds=10,
+    )
+
+    normalized = await provider.normalize("https://www.pinterest.com/pin/pin-download-first/")
+
+    assert normalized.resource_type == "photo_post"
+    assert normalized.engine_name == "gallery-dl"
+    assert normalized.image_entries == ()
+    assert normalized.image_urls == ()

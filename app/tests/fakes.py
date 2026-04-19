@@ -39,6 +39,8 @@ class FakeProvider:
         self.broken_image_entries: dict[str, set[int]] = defaultdict(set)
         self.audio_fail_keys: set[str] = set()
         self.invalid_urls: set[str] = set()
+        self.download_first_gallery_keys: set[str] = set()
+        self.photo_extensions: dict[str, tuple[str, ...]] = {}
 
     def extract_first_url(self, text: str) -> str | None:
         return extract_first_tiktok_url(text)
@@ -72,6 +74,7 @@ class FakeProvider:
             raise NormalizationError("missing video id")
 
         normalized_key = build_cache_key(Platform.TIKTOK, resource_type, resource_id)
+        photo_extensions = self.photo_extensions.get(normalized_key, ())
         return NormalizedResource(
             platform=Platform.TIKTOK,
             resource_type=resource_type,
@@ -79,17 +82,18 @@ class FakeProvider:
             normalized_key=normalized_key,
             original_url=url,
             canonical_url=url.split("?", 1)[0],
+            engine_name="gallery-dl" if normalized_key in self.download_first_gallery_keys else "yt-dlp",
             media_kind="gallery" if resource_type == "photo_post" and len(image_urls) > 1 else ("photo" if resource_type == "photo_post" else ("audio" if resource_type == "music_only" else "video")),
             title=resource_type,
             author="author",
             audio_url=audio_url,
-            image_urls=image_urls,
-            image_entries=tuple(
+            image_urls=() if normalized_key in self.download_first_gallery_keys else image_urls,
+            image_entries=() if normalized_key in self.download_first_gallery_keys else tuple(
                 VisualMediaEntry(source_url=image_url, order=index, mime_type_hint="image/jpeg")
                 for index, image_url in enumerate(image_urls, start=1)
             ),
             duration_sec=10,
-            has_expected_audio=audio_url is not None if resource_type != "video" else None,
+            has_expected_audio=(None if normalized_key in self.download_first_gallery_keys and resource_type == "photo_post" else (audio_url is not None if resource_type != "video" else None)),
         )
 
     async def fetch_metadata(self, normalized: NormalizedResource) -> MediaMetadata:
@@ -130,21 +134,29 @@ class FakeProvider:
             self.image_download_calls[normalized.normalized_key] += 1
         if entry_index in self.broken_image_entries[normalized.normalized_key]:
             raise DownloadError("image download failed", temporary=True)
-        path = work_dir / f"{normalized.resource_id}-{entry_index}.jpg"
+        extension = self._photo_extension(normalized.normalized_key, entry_index)
+        path = work_dir / f"{normalized.resource_id}-{entry_index}.{extension}"
         path.write_bytes(f"image-{entry_index}".encode("utf-8"))
         return path
 
     async def download_images(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, ...]:
         paths: list[Path] = []
-        for index, _ in enumerate(normalized.image_urls, start=1):
+        total = len(normalized.image_urls) if normalized.image_urls else self.photo_counts[normalized.normalized_key]
+        for index in range(1, total + 1):
             path = await self.download_image_entry(
                 normalized,
                 work_dir,
-                source_url=normalized.image_urls[index - 1],
+                source_url=normalized.image_urls[index - 1] if normalized.image_urls else f"https://example.com/{normalized.resource_id}-{index}.jpg",
                 entry_index=index,
             )
             paths.append(path)
         return tuple(paths)
+
+    def _photo_extension(self, normalized_key: str, entry_index: int) -> str:
+        configured = self.photo_extensions.get(normalized_key, ())
+        if configured and entry_index <= len(configured):
+            return configured[entry_index - 1]
+        return "jpg"
 
 
 class FakeGenericProvider:
@@ -156,6 +168,9 @@ class FakeGenericProvider:
         self.image_download_calls: dict[str, int] = defaultdict(int)
         self.broken_image_entries: dict[str, set[int]] = defaultdict(set)
         self.audio_fail_keys: set[str] = set()
+        self.download_first_gallery_keys: set[str] = set()
+        self.photo_counts: dict[str, int] = defaultdict(lambda: 3)
+        self.photo_extensions: dict[str, tuple[str, ...]] = {}
 
     def extract_first_url(self, text: str) -> str | None:
         return extract_first_supported_url(text, self._platform)
@@ -183,6 +198,7 @@ class FakeGenericProvider:
             audio_url = None
 
         normalized_key = build_cache_key(self._platform, resource_type, resource_id)
+        photo_extensions = self.photo_extensions.get(normalized_key, ())
         return NormalizedResource(
             platform=self._platform,
             resource_type=resource_type,
@@ -190,17 +206,18 @@ class FakeGenericProvider:
             normalized_key=normalized_key,
             original_url=url,
             canonical_url=url.split("?", 1)[0],
+            engine_name="gallery-dl" if normalized_key in self.download_first_gallery_keys else "yt-dlp",
             media_kind="gallery" if resource_type == "photo_post" and len(image_urls) > 1 else ("photo" if resource_type == "photo_post" else ("audio" if resource_type == "music_only" else "video")),
             title=f"{self._platform.value}-{resource_type}",
             author=f"{self._platform.value}-author",
             audio_url=audio_url,
-            image_urls=image_urls,
-            image_entries=tuple(
+            image_urls=() if normalized_key in self.download_first_gallery_keys else image_urls,
+            image_entries=() if normalized_key in self.download_first_gallery_keys else tuple(
                 VisualMediaEntry(source_url=image_url, order=index, mime_type_hint="image/jpeg")
                 for index, image_url in enumerate(image_urls, start=1)
             ),
             duration_sec=60,
-            has_expected_audio=audio_url is not None if resource_type != "video" else None,
+            has_expected_audio=(None if normalized_key in self.download_first_gallery_keys and resource_type == "photo_post" else (audio_url is not None if resource_type != "video" else None)),
         )
 
     async def fetch_metadata(self, normalized: NormalizedResource) -> MediaMetadata:
@@ -242,21 +259,29 @@ class FakeGenericProvider:
             self.image_download_calls[normalized.normalized_key] += 1
         if entry_index in self.broken_image_entries[normalized.normalized_key]:
             raise DownloadError("image download failed", temporary=True)
-        path = work_dir / f"{normalized.resource_id}-{entry_index}.jpg"
+        extension = self._photo_extension(normalized.normalized_key, entry_index)
+        path = work_dir / f"{normalized.resource_id}-{entry_index}.{extension}"
         path.write_bytes(f"image-{entry_index}".encode("utf-8"))
         return path
 
     async def download_images(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, ...]:
         paths: list[Path] = []
-        for index, _ in enumerate(normalized.image_urls, start=1):
+        total = len(normalized.image_urls) if normalized.image_urls else self.photo_counts[normalized.normalized_key]
+        for index in range(1, total + 1):
             path = await self.download_image_entry(
                 normalized,
                 work_dir,
-                source_url=normalized.image_urls[index - 1],
+                source_url=normalized.image_urls[index - 1] if normalized.image_urls else f"https://cdn.example/{normalized.resource_id}-{index}.jpg",
                 entry_index=index,
             )
             paths.append(path)
         return tuple(paths)
+
+    def _photo_extension(self, normalized_key: str, entry_index: int) -> str:
+        configured = self.photo_extensions.get(normalized_key, ())
+        if configured and entry_index <= len(configured):
+            return configured[entry_index - 1]
+        return "jpg"
 
 
 class FakeFfmpegAdapter:
@@ -265,6 +290,7 @@ class FakeFfmpegAdapter:
         self.no_audio_keys: set[str] = set()
         self.thumbnail_fail_keys: set[str] = set()
         self.transcode_fail_keys: set[str] = set()
+        self.image_normalize_fail_keys: set[str] = set()
         self.calls: dict[str, int] = defaultdict(int)
 
     async def extract_audio(self, video_path: Path, output_path: Path, *, normalized_key: str) -> Path:
@@ -287,10 +313,8 @@ class FakeFfmpegAdapter:
         cover_path: Path | None = None,
     ) -> Path:
         self.calls[f"transcode:{normalized_key}"] += 1
-        if normalized_key in self.transcode_fail_keys:
+        if normalized_key in self.transcode_fail_keys or normalized_key in self.fail_keys:
             raise AudioExtractionError("transcode failed")
-        if cover_path is not None and normalized_key in self.fail_keys:
-            raise AudioExtractionError("cover embed failed")
         output_path.write_bytes(b"mp3-bytes")
         return output_path
 
@@ -298,6 +322,13 @@ class FakeFfmpegAdapter:
         self.calls[f"thumbnail:{normalized_key}"] += 1
         if normalized_key in self.thumbnail_fail_keys:
             raise AudioExtractionError("thumbnail failed")
+        output_path.write_bytes(b"jpg-bytes")
+        return output_path
+
+    async def normalize_image_to_jpg(self, source_path: Path, output_path: Path, *, normalized_key: str) -> Path:
+        self.calls[f"image:{normalized_key}"] += 1
+        if normalized_key in self.image_normalize_fail_keys:
+            raise AudioExtractionError("image normalize failed")
         output_path.write_bytes(b"jpg-bytes")
         return output_path
 
@@ -314,6 +345,8 @@ class FakeAudioSend:
     title: str | None
     performer: str | None
     thumbnail_used: bool
+    duration: int | None
+    filename: str | None
 
 
 class FakeGateway:
@@ -327,6 +360,7 @@ class FakeGateway:
         self.sent_audio_receipts: list[DeliveryReceipt] = []
         self.sent_photo_receipts: list[DeliveryReceipt] = []
         self.sent_audio_requests: list[FakeAudioSend] = []
+        self.sent_photo_paths: list[Path] = []
         self.invalid_file_ids: set[str] = set()
         self.fail_audio_upload = False
         self.fail_photo_group_upload = False
@@ -363,12 +397,15 @@ class FakeGateway:
         *,
         title: str | None = None,
         performer: str | None = None,
+        duration: int | None = None,
     ) -> DeliveryReceipt:
         if file_id in self.invalid_file_ids:
             raise InvalidCachedMediaError("invalid audio id", media_kind="audio")
         receipt = DeliveryReceipt(file_id=file_id, file_unique_id=f"unique-{file_id}", size_bytes=512)
         self.sent_audio_receipts.append(receipt)
-        self.sent_audio_requests.append(FakeAudioSend(title=title, performer=performer, thumbnail_used=False))
+        self.sent_audio_requests.append(
+            FakeAudioSend(title=title, performer=performer, thumbnail_used=False, duration=duration, filename=None)
+        )
         return receipt
 
     async def send_video_by_upload(self, chat_id: int, file_path: Path, caption: str, reply_to_message_id: int | None = None) -> DeliveryReceipt:
@@ -391,7 +428,9 @@ class FakeGateway:
         *,
         title: str | None = None,
         performer: str | None = None,
+        duration: int | None = None,
         thumbnail_path: Path | None = None,
+        filename: str | None = None,
     ) -> DeliveryReceipt:
         if self.fail_audio_upload:
             raise TelegramDeliveryError("audio upload failed")
@@ -404,7 +443,13 @@ class FakeGateway:
         )
         self.sent_audio_receipts.append(receipt)
         self.sent_audio_requests.append(
-            FakeAudioSend(title=title, performer=performer, thumbnail_used=thumbnail_path is not None)
+            FakeAudioSend(
+                title=title,
+                performer=performer,
+                thumbnail_used=thumbnail_path is not None,
+                duration=duration,
+                filename=filename or file_path.name,
+            )
         )
         return receipt
 
@@ -417,6 +462,7 @@ class FakeGateway:
     ) -> DeliveryReceipt:
         if file_path.stat().st_size > self.max_file_size_bytes:
             raise MediaTooLargeError()
+        self.sent_photo_paths.append(file_path)
         receipt = DeliveryReceipt(
             file_id=f"photo:{file_path.stem}:{len(self.sent_photo_receipts)}",
             file_unique_id=f"photo-unique:{file_path.stem}:{len(self.sent_photo_receipts)}",

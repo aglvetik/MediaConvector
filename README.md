@@ -39,6 +39,7 @@ In practice:
 - Video posts
   - sends video
   - tries to extract and send separate audio when an audio track exists
+  - audio is prepared as Telegram-safe MP3 with title/performer metadata when available
   - if separate audio extraction fails, the video can still be sent
 - Image-only posts
   - sends one image as a Telegram photo
@@ -48,6 +49,7 @@ In practice:
   - skips broken gallery items when it can still deliver the remaining images
 - Audio-only URLs
   - sends Telegram audio
+  - passes title, performer, duration, and thumbnail when available
 
 ## What It Does Not Do
 
@@ -145,8 +147,9 @@ The bot will:
 2. send `Загрузка 🔎`
 3. route the URL to `yt-dlp` or `gallery-dl`
 4. normalize the result into video, photo, gallery, or audio
-5. deliver the media to Telegram
-6. reuse cached Telegram `file_id` values on repeated requests when possible
+5. normalize gallery downloads from disk and prepare audio metadata/tags when possible
+6. deliver the media to Telegram
+7. reuse cached Telegram `file_id` values on repeated requests when possible
 
 Messages without supported URLs are ignored.
 

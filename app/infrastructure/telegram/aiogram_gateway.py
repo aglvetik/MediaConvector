@@ -75,6 +75,7 @@ class AiogramTelegramGateway:
         *,
         title: str | None = None,
         performer: str | None = None,
+        duration: int | None = None,
     ) -> DeliveryReceipt:
         message = await self._call_with_retry(
             lambda: self._bot.send_audio(
@@ -83,6 +84,7 @@ class AiogramTelegramGateway:
                 caption=caption,
                 title=title,
                 performer=performer,
+                duration=duration,
                 reply_parameters=self._reply_parameters(reply_to_message_id),
             ),
             media_kind="audio",
@@ -113,16 +115,19 @@ class AiogramTelegramGateway:
         *,
         title: str | None = None,
         performer: str | None = None,
+        duration: int | None = None,
         thumbnail_path: Path | None = None,
+        filename: str | None = None,
     ) -> DeliveryReceipt:
         self._ensure_file_size(file_path)
         message = await self._call_with_retry(
             lambda: self._bot.send_audio(
                 chat_id=chat_id,
-                audio=FSInputFile(file_path),
+                audio=FSInputFile(file_path, filename=filename) if filename is not None else FSInputFile(file_path),
                 caption=caption,
                 title=title,
                 performer=performer,
+                duration=duration,
                 thumbnail=FSInputFile(thumbnail_path) if thumbnail_path is not None else None,
                 reply_parameters=self._reply_parameters(reply_to_message_id),
             ),

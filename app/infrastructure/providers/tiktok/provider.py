@@ -169,7 +169,8 @@ class TikTokProvider:
                 title = title or gallery_artifact.title
                 author = author or gallery_artifact.uploader
 
-            if resource_type == TikTokResourceType.PHOTO_POST and not image_urls:
+            allow_download_first_gallery = resource_type == TikTokResourceType.PHOTO_POST and self._gallery_downloader is not None
+            if resource_type == TikTokResourceType.PHOTO_POST and not image_urls and not allow_download_first_gallery:
                 raise NormalizationError(
                     "Photo post did not expose any images.",
                     context={"url": original_url, "expanded_url": expanded_url, "cleaned_url": canonical_url},
@@ -187,8 +188,10 @@ class TikTokProvider:
                 normalized_key=build_cache_key(Platform.TIKTOK, resource_type.value, resource_id),
                 original_url=original_url,
                 canonical_url=canonical_url,
-                engine_name="gallery-dl" if resource_type == TikTokResourceType.PHOTO_POST and gallery_artifact is not None else "yt-dlp",
-                media_kind=gallery_artifact.media_kind if gallery_artifact is not None else self._resolve_media_kind(resource_type, image_urls),
+                engine_name="gallery-dl" if resource_type == TikTokResourceType.PHOTO_POST and self._gallery_downloader is not None else "yt-dlp",
+                media_kind=gallery_artifact.media_kind
+                if gallery_artifact is not None
+                else ("gallery" if resource_type == TikTokResourceType.PHOTO_POST and not image_urls else self._resolve_media_kind(resource_type, image_urls)),
                 title=title,
                 author=author,
                 video_url=video_url,
@@ -206,7 +209,11 @@ class TikTokProvider:
                 ),
                 thumbnail_url=thumbnail_url,
                 duration_sec=duration_sec,
-                has_expected_audio=audio_url is not None if resource_type != TikTokResourceType.VIDEO else None,
+                has_expected_audio=(
+                    audio_url is not None
+                    if resource_type != TikTokResourceType.VIDEO and not (resource_type == TikTokResourceType.PHOTO_POST and self._gallery_downloader is not None and gallery_artifact is None)
+                    else None
+                ),
             )
         except httpx.HTTPError as exc:
             log_event(
@@ -252,6 +259,7 @@ class TikTokProvider:
             normalized_key=normalized.normalized_key,
             resource_type=normalized.resource_type,
             canonical_url=normalized.canonical_url,
+            engine_name=normalized.engine_name,
         )
         if resource_type == TikTokResourceType.PHOTO_POST:
             log_event(self._logger, 20, "tiktok_photo_post_detected", normalized_key=normalized.normalized_key)
@@ -300,7 +308,7 @@ class TikTokProvider:
                 author=normalized.author,
                 description=None,
                 size_bytes=None,
-                has_audio=normalized.audio_url is not None,
+                has_audio=normalized.has_expected_audio,
             )
         return await self._downloader.fetch_metadata(normalized)
 
@@ -423,7 +431,7 @@ class TikTokProvider:
         log_event(
             self._logger,
             20,
-            "media_download_started",
+            "gallery_download_started",
             normalized_key=normalized.normalized_key,
             source_type=Platform.TIKTOK.value,
             canonical_url=normalized.canonical_url,
@@ -431,6 +439,18 @@ class TikTokProvider:
             engine_name="gallery-dl",
         )
         collection = await self._gallery_downloader.download_collection(normalized.canonical_url, work_dir)
+        log_event(
+            self._logger,
+            20,
+            "gallery_files_collected",
+            normalized_key=normalized.normalized_key,
+            source_type=Platform.TIKTOK.value,
+            canonical_url=normalized.canonical_url,
+            file_count=len(collection.all_files),
+            image_count=len(collection.image_files),
+            audio_count=len(collection.audio_files),
+            video_count=len(collection.video_files),
+        )
         bundle = _PreparedGalleryBundle(
             work_dir=work_dir,
             image_files=collection.image_files,
@@ -441,7 +461,7 @@ class TikTokProvider:
         log_event(
             self._logger,
             20,
-            "media_download_finished",
+            "gallery_download_finished",
             normalized_key=normalized.normalized_key,
             source_type=Platform.TIKTOK.value,
             canonical_url=normalized.canonical_url,

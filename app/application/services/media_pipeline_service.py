@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
+
 from app import messages
 from app.application.services.cache_service import CacheService
 from app.application.services.dedup_service import InFlightDedupService
@@ -28,6 +30,16 @@ from app.infrastructure.temp import TempFileManager
 class OwnerPipelineResult:
     media_result: MediaResult
     cache_entry: CacheEntry
+
+
+@dataclass(slots=True)
+class PreparedAudioAsset:
+    file_path: Path
+    title: str | None
+    performer: str | None
+    duration_sec: int | None
+    thumbnail_path: Path | None
+    filename: str
 
 
 class MediaPipelineService:
@@ -157,11 +169,21 @@ class MediaPipelineService:
     ) -> OwnerPipelineResult:
         metadata = await provider.fetch_metadata(request.normalized_resource)
         video_path = await provider.download_video(request.normalized_resource, work_dir)
-        audio_path, audio_notice = await self._try_extract_audio(request, video_path, metadata, work_dir)
+        prepared_audio, audio_notice = await self._prepare_audio_from_video(
+            request,
+            video_path,
+            metadata,
+            work_dir,
+        )
         media_result = await self._delivery_service.deliver_uploads(
             request,
             video_path,
-            audio_path,
+            prepared_audio.file_path if prepared_audio is not None else None,
+            audio_title=prepared_audio.title if prepared_audio is not None else None,
+            audio_performer=prepared_audio.performer if prepared_audio is not None else None,
+            audio_duration_sec=prepared_audio.duration_sec if prepared_audio is not None else None,
+            audio_thumbnail_path=prepared_audio.thumbnail_path if prepared_audio is not None else None,
+            audio_filename=prepared_audio.filename if prepared_audio is not None else None,
             missing_audio_notice=audio_notice or messages.NO_AUDIO_TRACK,
         )
         cache_entry = await self._cache_service.save_delivery_result(
@@ -187,12 +209,21 @@ class MediaPipelineService:
                 if request.normalized_resource.has_expected_audio is not None
                 else metadata.has_audio is not False
             )
-            audio_path: Path | None = None
+            prepared_audio: PreparedAudioAsset | None = None
             missing_audio_notice: str | None = None
             if audio_expected:
                 try:
-                    audio_path = await provider.download_audio(request.normalized_resource, work_dir)
-                    missing_audio_notice = messages.NO_AUDIO_TRACK if audio_path is None else None
+                    source_audio_path = await provider.download_audio(request.normalized_resource, work_dir)
+                    if source_audio_path is None:
+                        missing_audio_notice = messages.NO_AUDIO_TRACK
+                    else:
+                        prepared_audio = await self._prepare_audio_delivery_asset(
+                            request=request,
+                            metadata=metadata,
+                            source_path=source_audio_path,
+                            work_dir=work_dir,
+                            fallback_cover_path=photo_paths[0] if photo_paths else None,
+                        )
                 except Exception as exc:
                     log_event(
                         self._logger,
@@ -203,14 +234,18 @@ class MediaPipelineService:
                         source_type=request.normalized_resource.platform.value,
                         error_code=getattr(exc, "error_code", "download_failed"),
                     )
-                    audio_path = None
                     missing_audio_notice = messages.SEPARATE_AUDIO_SEND_FAILED
             media_result = await self._delivery_service.deliver_photo_post_uploads(
                 request,
                 photo_paths,
-                audio_path,
+                prepared_audio.file_path if prepared_audio is not None else None,
                 audio_expected=audio_expected,
                 missing_audio_notice=missing_audio_notice,
+                audio_title=prepared_audio.title if prepared_audio is not None else None,
+                audio_performer=prepared_audio.performer if prepared_audio is not None else None,
+                audio_duration_sec=prepared_audio.duration_sec if prepared_audio is not None else None,
+                audio_thumbnail_path=prepared_audio.thumbnail_path if prepared_audio is not None else None,
+                audio_filename=prepared_audio.filename if prepared_audio is not None else None,
             )
             cache_entry = await self._cache_service.save_photo_delivery_result(
                 resource=request.normalized_resource,
@@ -239,11 +274,24 @@ class MediaPipelineService:
             chat_id=request.chat_id,
             normalized_key=request.normalized_resource.normalized_key,
         )
-        audio_path = await provider.download_audio(request.normalized_resource, work_dir)
+        source_audio_path = await provider.download_audio(request.normalized_resource, work_dir)
+        prepared_audio = None
+        if source_audio_path is not None:
+            prepared_audio = await self._prepare_audio_delivery_asset(
+                request=request,
+                metadata=metadata,
+                source_path=source_audio_path,
+                work_dir=work_dir,
+            )
         media_result = await self._delivery_service.deliver_audio_only(
             request,
-            audio_path,
+            prepared_audio.file_path if prepared_audio is not None else None,
             missing_audio_notice=messages.NO_AUDIO_TRACK,
+            title=prepared_audio.title if prepared_audio is not None else None,
+            performer=prepared_audio.performer if prepared_audio is not None else None,
+            duration_sec=prepared_audio.duration_sec if prepared_audio is not None else None,
+            thumbnail_path=prepared_audio.thumbnail_path if prepared_audio is not None else None,
+            filename=prepared_audio.filename if prepared_audio is not None else None,
         )
         if media_result.audio_receipt is not None:
             cache_entry = await self._cache_service.save_audio_only_result(
@@ -299,17 +347,29 @@ class MediaPipelineService:
         work_dir = await self._temp_file_manager.create_work_dir(f"{request.request_id}-audio")
         try:
             metadata = await provider.fetch_metadata(request.normalized_resource)
-            audio_path: Path | None
+            prepared_audio: PreparedAudioAsset | None = None
             if request.normalized_resource.resource_type == "video":
                 video_path = await provider.download_video(request.normalized_resource, work_dir)
-                audio_path, _ = await self._try_extract_audio(request, video_path, metadata, work_dir)
+                prepared_audio, _ = await self._prepare_audio_from_video(request, video_path, metadata, work_dir)
             else:
-                audio_path = await provider.download_audio(request.normalized_resource, work_dir)
+                source_audio_path = await provider.download_audio(request.normalized_resource, work_dir)
+                if source_audio_path is not None:
+                    prepared_audio = await self._prepare_audio_delivery_asset(
+                        request=request,
+                        metadata=metadata,
+                        source_path=source_audio_path,
+                        work_dir=work_dir,
+                    )
             result = await self._delivery_service.deliver_audio_only(
                 request,
-                audio_path,
+                prepared_audio.file_path if prepared_audio is not None else None,
                 missing_audio_notice=messages.NO_AUDIO_TRACK,
                 primary_delivered=True,
+                title=prepared_audio.title if prepared_audio is not None else None,
+                performer=prepared_audio.performer if prepared_audio is not None else None,
+                duration_sec=prepared_audio.duration_sec if prepared_audio is not None else None,
+                thumbnail_path=prepared_audio.thumbnail_path if prepared_audio is not None else None,
+                filename=prepared_audio.filename if prepared_audio is not None else None,
             )
             cache_entry = await self._cache_service.save_audio_refresh(
                 resource=request.normalized_resource,
@@ -340,16 +400,17 @@ class MediaPipelineService:
         finally:
             await self._temp_file_manager.remove_dir(work_dir)
 
-    async def _try_extract_audio(
+    async def _prepare_audio_from_video(
         self,
         request: MediaRequest,
         video_path: Path,
         metadata: MediaMetadata | None,
         work_dir: Path,
-    ) -> tuple[Path | None, str | None]:
+        *,
+        fallback_cover_path: Path | None = None,
+    ) -> tuple[PreparedAudioAsset | None, str | None]:
         if metadata is not None and metadata.has_audio is False:
             return None, messages.NO_AUDIO_TRACK
-        audio_path = work_dir / f"{request.normalized_resource.resource_id}.mp3"
         log_event(
             self._logger,
             20,
@@ -359,10 +420,12 @@ class MediaPipelineService:
             source_type=request.normalized_resource.platform.value,
         )
         try:
-            extracted = await self._ffmpeg_adapter.extract_audio(
-                video_path,
-                audio_path,
-                normalized_key=request.normalized_resource.normalized_key,
+            prepared = await self._prepare_audio_delivery_asset(
+                request=request,
+                metadata=metadata,
+                source_path=video_path,
+                work_dir=work_dir,
+                fallback_cover_path=fallback_cover_path,
             )
             log_event(
                 self._logger,
@@ -373,7 +436,7 @@ class MediaPipelineService:
                 source_type=request.normalized_resource.platform.value,
                 success=True,
             )
-            return extracted, None
+            return prepared, None
         except AudioExtractionError as exc:
             log_event(
                 self._logger,
@@ -404,6 +467,55 @@ class MediaPipelineService:
         provider: DownloaderProvider,
         work_dir: Path,
     ) -> tuple[Path, ...]:
+        if request.normalized_resource.engine_name == "gallery-dl":
+            log_event(
+                self._logger,
+                20,
+                "gallery_artifact_built",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                canonical_url=request.normalized_resource.canonical_url,
+                image_count=request.normalized_resource.entry_count,
+                has_expected_audio=request.normalized_resource.has_expected_audio,
+            )
+            raw_paths = await provider.download_images(request.normalized_resource, work_dir)
+            normalized_paths = await self._normalize_visual_files(request, raw_paths, work_dir)
+            log_event(
+                self._logger,
+                20,
+                "gallery_files_normalized",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                canonical_url=request.normalized_resource.canonical_url,
+                image_count=len(raw_paths),
+                valid_image_count=len(normalized_paths),
+                skipped_image_count=max(len(raw_paths) - len(normalized_paths), 0),
+            )
+            log_event(
+                self._logger,
+                20,
+                "gallery_prepared",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                canonical_url=request.normalized_resource.canonical_url,
+                image_count=len(raw_paths),
+                valid_image_count=len(normalized_paths),
+                skipped_image_count=max(len(raw_paths) - len(normalized_paths), 0),
+            )
+            if not normalized_paths:
+                raise DownloadError(
+                    "No visual entries could be prepared for delivery.",
+                    temporary=False,
+                    context={
+                        "normalized_key": request.normalized_resource.normalized_key,
+                        "image_count": len(raw_paths),
+                    },
+                )
+            return normalized_paths
+
         entries = request.normalized_resource.image_entries or tuple(
             VisualMediaEntry(source_url=image_url, order=index)
             for index, image_url in enumerate(request.normalized_resource.image_urls, start=1)
@@ -475,6 +587,8 @@ class MediaPipelineService:
             )
 
         valid_count = len(valid_paths)
+        normalized_paths = await self._normalize_visual_files(request, tuple(valid_paths), work_dir)
+        normalized_count = len(normalized_paths)
         log_event(
             self._logger,
             20,
@@ -484,7 +598,7 @@ class MediaPipelineService:
             source_type=request.normalized_resource.platform.value,
             canonical_url=request.normalized_resource.canonical_url,
             image_count=len(entries),
-            valid_image_count=valid_count,
+            valid_image_count=normalized_count,
             skipped_image_count=skipped_count,
         )
         if skipped_count:
@@ -497,10 +611,10 @@ class MediaPipelineService:
                 source_type=request.normalized_resource.platform.value,
                 canonical_url=request.normalized_resource.canonical_url,
                 image_count=len(entries),
-                valid_image_count=valid_count,
+                valid_image_count=normalized_count,
                 skipped_image_count=skipped_count,
             )
-        if not valid_paths:
+        if not normalized_paths:
             raise DownloadError(
                 "No visual entries could be prepared for delivery.",
                 temporary=False,
@@ -509,4 +623,219 @@ class MediaPipelineService:
                     "image_count": len(entries),
                 },
             )
-        return tuple(valid_paths)
+        return normalized_paths
+
+    async def _normalize_visual_files(
+        self,
+        request: MediaRequest,
+        paths: tuple[Path, ...],
+        work_dir: Path,
+    ) -> tuple[Path, ...]:
+        normalized_paths: list[Path] = []
+        skipped_count = 0
+        for index, path in enumerate(paths, start=1):
+            try:
+                normalized_path = await self._normalize_visual_file(request, path, work_dir, index=index)
+            except Exception as exc:
+                skipped_count += 1
+                log_event(
+                    self._logger,
+                    30,
+                    "image_download_failed",
+                    request_id=request.request_id,
+                    normalized_key=request.normalized_resource.normalized_key,
+                    source_type=request.normalized_resource.platform.value,
+                    canonical_url=request.normalized_resource.canonical_url,
+                    image_index=index,
+                    original_image_url=str(path),
+                    normalized_image_url=str(path),
+                    https_upgrade_attempted=False,
+                    status_code=None,
+                    exception=str(exc),
+                    error_code=getattr(exc, "error_code", "image_normalize_failed"),
+                )
+                continue
+            normalized_paths.append(normalized_path)
+        if skipped_count:
+            log_event(
+                self._logger,
+                20,
+                "gallery_partial_success",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                canonical_url=request.normalized_resource.canonical_url,
+                image_count=len(paths),
+                valid_image_count=len(normalized_paths),
+                skipped_image_count=skipped_count,
+            )
+        return tuple(normalized_paths)
+
+    async def _normalize_visual_file(
+        self,
+        request: MediaRequest,
+        path: Path,
+        work_dir: Path,
+        *,
+        index: int,
+    ) -> Path:
+        suffix = path.suffix.lower()
+        if suffix in {".jpg", ".jpeg"}:
+            return path
+        if suffix not in {".png", ".webp", ".bmp", ".gif"}:
+            return path
+        output_path = work_dir / f"{request.normalized_resource.resource_id}-image-{index}.jpg"
+        converted = await self._ffmpeg_adapter.normalize_image_to_jpg(
+            path,
+            output_path,
+            normalized_key=request.normalized_resource.normalized_key,
+        )
+        log_event(
+            self._logger,
+            20,
+            "image_converted_to_jpg",
+            request_id=request.request_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            original_path=str(path),
+            converted_path=str(converted),
+        )
+        return converted
+
+    async def _prepare_audio_delivery_asset(
+        self,
+        *,
+        request: MediaRequest,
+        metadata: MediaMetadata | None,
+        source_path: Path,
+        work_dir: Path,
+        fallback_cover_path: Path | None = None,
+    ) -> PreparedAudioAsset:
+        title = self._resolve_audio_title(request, metadata)
+        performer = self._resolve_audio_performer(request, metadata)
+        duration_sec = metadata.duration_sec if metadata is not None else request.normalized_resource.duration_sec
+        filename = self._build_audio_filename(request, title, performer)
+        thumbnail_path = await self._prepare_audio_thumbnail(
+            request=request,
+            work_dir=work_dir,
+            fallback_cover_path=fallback_cover_path,
+        )
+        log_event(
+            self._logger,
+            20,
+            "audio_metadata_prepared",
+            request_id=request.request_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            title=title,
+            performer=performer,
+            duration_sec=duration_sec,
+            thumbnail_available=thumbnail_path is not None,
+            filename=filename,
+        )
+        output_path = work_dir / filename
+        prepared = await self._ffmpeg_adapter.transcode_audio_to_mp3(
+            source_path,
+            output_path,
+            normalized_key=request.normalized_resource.normalized_key,
+            title=title,
+            performer=performer,
+            cover_path=thumbnail_path,
+        )
+        log_event(
+            self._logger,
+            20,
+            "audio_tags_written",
+            request_id=request.request_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            file_path=str(prepared),
+            title=title,
+            performer=performer,
+        )
+        return PreparedAudioAsset(
+            file_path=prepared,
+            title=title,
+            performer=performer,
+            duration_sec=duration_sec,
+            thumbnail_path=thumbnail_path,
+            filename=filename,
+        )
+
+    async def _prepare_audio_thumbnail(
+        self,
+        *,
+        request: MediaRequest,
+        work_dir: Path,
+        fallback_cover_path: Path | None = None,
+    ) -> Path | None:
+        source_path: Path | None = fallback_cover_path
+        if source_path is None and request.normalized_resource.thumbnail_url:
+            source_path = await self._download_thumbnail_asset(
+                request=request,
+                url=request.normalized_resource.thumbnail_url,
+                work_dir=work_dir,
+            )
+        if source_path is None:
+            return None
+        output_path = work_dir / f"{request.normalized_resource.resource_id}-thumb.jpg"
+        try:
+            return await self._ffmpeg_adapter.prepare_audio_thumbnail(
+                source_path,
+                output_path,
+                normalized_key=request.normalized_resource.normalized_key,
+            )
+        except Exception:
+            return None
+
+    async def _download_thumbnail_asset(
+        self,
+        *,
+        request: MediaRequest,
+        url: str,
+        work_dir: Path,
+    ) -> Path | None:
+        suffix = Path(url.split("?", 1)[0]).suffix or ".jpg"
+        target = work_dir / f"{request.normalized_resource.resource_id}-remote-thumb{suffix}"
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+        except httpx.HTTPError:
+            return None
+        target.write_bytes(response.content)
+        return target
+
+    @staticmethod
+    def _resolve_audio_title(request: MediaRequest, metadata: MediaMetadata | None) -> str:
+        for candidate in (
+            metadata.title if metadata is not None else None,
+            request.normalized_resource.title,
+        ):
+            if candidate:
+                cleaned = " ".join(candidate.split()).strip()
+                if cleaned:
+                    return cleaned
+        platform_label = request.normalized_resource.platform.value.title()
+        return f"{platform_label} audio"
+
+    @staticmethod
+    def _resolve_audio_performer(request: MediaRequest, metadata: MediaMetadata | None) -> str | None:
+        for candidate in (
+            metadata.author if metadata is not None else None,
+            request.normalized_resource.author,
+        ):
+            if candidate:
+                cleaned = " ".join(candidate.split()).strip()
+                if cleaned:
+                    return cleaned
+        return request.normalized_resource.platform.value.title()
+
+    def _build_audio_filename(self, request: MediaRequest, title: str | None, performer: str | None) -> str:
+        parts = [performer or "", title or ""]
+        stem = " - ".join(part for part in parts if part).strip()
+        if not stem:
+            stem = f"{request.normalized_resource.platform.value}-audio"
+        safe = "".join(character if character.isalnum() or character in {" ", "-", "_", "."} else "_" for character in stem)
+        safe = " ".join(safe.split()).strip(" ._")
+        if not safe:
+            safe = f"{request.normalized_resource.platform.value}-audio"
+        return f"{safe[:96]}.mp3"

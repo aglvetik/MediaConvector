@@ -58,21 +58,51 @@ class YtDlpClient:
     async def download_video(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, MediaMetadata]:
         last_error: DownloadError | DownloadUnavailableError | None = None
         for format_selector, merge_output_format in (
+            ("bv*+ba/b", "mp4"),
             ("bestvideo+bestaudio/best", "mp4"),
             ("best", None),
             (None, None),
         ):
             try:
-                return await self.download_url(
+                log_event(
+                    self._logger,
+                    20,
+                    "ytdlp_selector_attempt",
+                    normalized_key=normalized.normalized_key,
+                    canonical_url=normalized.canonical_url,
+                    format_selector=format_selector or "<default>",
+                    media_kind="video",
+                )
+                result = await self.download_url(
                     normalized.canonical_url,
                     work_dir,
                     normalized_key=normalized.normalized_key,
                     format_selector=format_selector,
                     merge_output_format=merge_output_format,
                 )
+                log_event(
+                    self._logger,
+                    20,
+                    "ytdlp_selector_success",
+                    normalized_key=normalized.normalized_key,
+                    canonical_url=normalized.canonical_url,
+                    format_selector=format_selector or "<default>",
+                    media_kind="video",
+                )
+                return result
             except (DownloadError, DownloadUnavailableError) as exc:
                 last_error = exc
                 context = getattr(exc, "context", {})
+                log_event(
+                    self._logger,
+                    30,
+                    "ytdlp_selector_failed",
+                    normalized_key=normalized.normalized_key,
+                    canonical_url=normalized.canonical_url,
+                    format_selector=format_selector or "<default>",
+                    media_kind="video",
+                    error_code=getattr(exc, "error_code", "download_failed"),
+                )
                 if not context.get("format_unavailable"):
                     raise
                 log_event(
@@ -148,7 +178,16 @@ class YtDlpClient:
         last_error: DownloadError | DownloadUnavailableError | None = None
         for format_selector in ("bestaudio/best", "best", None):
             try:
-                return await self.download_url(
+                log_event(
+                    self._logger,
+                    20,
+                    "ytdlp_selector_attempt",
+                    normalized_key=normalized_key,
+                    canonical_url=url,
+                    format_selector=format_selector or "<default>",
+                    media_kind="audio",
+                )
+                result = await self.download_url(
                     url,
                     work_dir,
                     normalized_key=normalized_key,
@@ -156,9 +195,29 @@ class YtDlpClient:
                     merge_output_format=None,
                     extra_options=extra_options,
                 )
+                log_event(
+                    self._logger,
+                    20,
+                    "ytdlp_selector_success",
+                    normalized_key=normalized_key,
+                    canonical_url=url,
+                    format_selector=format_selector or "<default>",
+                    media_kind="audio",
+                )
+                return result
             except (DownloadError, DownloadUnavailableError) as exc:
                 last_error = exc
                 context = getattr(exc, "context", {})
+                log_event(
+                    self._logger,
+                    30,
+                    "ytdlp_selector_failed",
+                    normalized_key=normalized_key,
+                    canonical_url=url,
+                    format_selector=format_selector or "<default>",
+                    media_kind="audio",
+                    error_code=getattr(exc, "error_code", "download_failed"),
+                )
                 if not context.get("format_unavailable"):
                     raise
                 log_event(

@@ -7,11 +7,11 @@ from app.domain.entities.media_result import MediaMetadata
 from app.domain.entities.normalized_resource import NormalizedResource
 from app.domain.entities.source_media_artifact import SourceMediaArtifact
 from app.domain.enums.platform import Platform
-from app.domain.errors import DownloadError, NormalizationError, UnsupportedUrlError
+from app.domain.errors import DownloadError, UnsupportedUrlError
 from app.domain.policies import build_cache_key
 from app.infrastructure.downloaders.gallerydl_client import GalleryDlClient
 from app.infrastructure.logging import get_logger, log_event
-from app.infrastructure.providers.gallery_utils import build_artifact_from_gallery_probe
+from app.infrastructure.providers.gallery_utils import build_artifact_from_gallery_probe, clean_url, fallback_source_id
 from app.infrastructure.providers.source_detection import detect_source_type, extract_first_supported_url
 
 
@@ -48,10 +48,31 @@ class GalleryDlUrlProvider:
         if not self.can_handle(url):
             raise UnsupportedUrlError()
 
-        probe_entries = await self._downloader.probe_url(url)
-        artifact = self._build_artifact(url, probe_entries)
+        artifact: SourceMediaArtifact | None = None
+        try:
+            probe_entries = await self._downloader.probe_url(url)
+        except DownloadError as exc:
+            log_event(
+                self._logger,
+                30,
+                "gallery_probe_failed",
+                source_type=self._platform.value,
+                canonical_url=url,
+                error_code=exc.error_code,
+            )
+        else:
+            artifact = self._build_artifact(url, probe_entries)
+
         if artifact is None:
-            raise NormalizationError("gallery-dl did not expose a supported media result.", context={"url": url})
+            canonical_url = clean_url(url)
+            source_id = fallback_source_id(canonical_url)
+            artifact = SourceMediaArtifact(
+                source_type=self._platform,
+                canonical_url=canonical_url,
+                media_kind=_fallback_media_kind(self._platform, canonical_url),
+                source_id=source_id,
+                engine_name="gallery-dl",
+            )
 
         resource_type = _artifact_to_resource_type(artifact.media_kind)
         normalized = NormalizedResource(
@@ -178,7 +199,7 @@ class GalleryDlUrlProvider:
         log_event(
             self._logger,
             20,
-            "media_download_started",
+            "gallery_download_started",
             normalized_key=normalized.normalized_key,
             source_type=self._platform.value,
             canonical_url=normalized.canonical_url,
@@ -186,6 +207,18 @@ class GalleryDlUrlProvider:
             engine_name="gallery-dl",
         )
         collection = await self._downloader.download_collection(normalized.canonical_url, work_dir)
+        log_event(
+            self._logger,
+            20,
+            "gallery_files_collected",
+            normalized_key=normalized.normalized_key,
+            source_type=self._platform.value,
+            canonical_url=normalized.canonical_url,
+            file_count=len(collection.all_files),
+            image_count=len(collection.image_files),
+            audio_count=len(collection.audio_files),
+            video_count=len(collection.video_files),
+        )
         bundle = _PreparedBundle(
             work_dir=work_dir,
             image_files=collection.image_files,
@@ -196,7 +229,7 @@ class GalleryDlUrlProvider:
         log_event(
             self._logger,
             20,
-            "media_download_finished",
+            "gallery_download_finished",
             normalized_key=normalized.normalized_key,
             source_type=self._platform.value,
             canonical_url=normalized.canonical_url,
@@ -215,3 +248,14 @@ def _artifact_to_resource_type(media_kind: str) -> str:
     if media_kind == "audio":
         return "music_only"
     return "video"
+
+
+def _fallback_media_kind(platform: Platform, canonical_url: str) -> str:
+    lowered = canonical_url.lower()
+    if platform == Platform.PINTEREST:
+        return "photo"
+    if platform == Platform.INSTAGRAM and "/reel/" in lowered:
+        return "video"
+    if platform == Platform.FACEBOOK and any(marker in lowered for marker in ("/watch", "/reel", "/videos")):
+        return "video"
+    return "gallery"

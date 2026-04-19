@@ -44,6 +44,7 @@ class TelegramGateway(Protocol):
         *,
         title: str | None = None,
         performer: str | None = None,
+        duration: int | None = None,
     ) -> DeliveryReceipt:
         ...
 
@@ -65,7 +66,9 @@ class TelegramGateway(Protocol):
         *,
         title: str | None = None,
         performer: str | None = None,
+        duration: int | None = None,
         thumbnail_path: Path | None = None,
+        filename: str | None = None,
     ) -> DeliveryReceipt:
         ...
 
