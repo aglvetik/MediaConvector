@@ -76,66 +76,140 @@ class TikTokProvider:
             raise UnsupportedUrlError()
 
         original_url = url
+        expanded_url: str | None = None
+        cleaned_url: str | None = None
         try:
-            resolved_url = await self._resolve_short_url(url)
-        except httpx.HTTPError as exc:
-            raise NormalizationError("Failed to resolve TikTok short URL.", context={"url": original_url}) from exc
-
-        sanitized_resolved_url = sanitize_url(resolved_url)
-        info: dict[str, object] = {}
-        try:
-            info = await self._downloader.probe_url(original_url)
-        except DownloadError:
-            info = {}
-
-        resource_type = self._resolve_resource_type(sanitized_resolved_url, info)
-        resource_id = self._resolve_resource_id(sanitized_resolved_url, info, resource_type)
-        canonical_url = sanitized_resolved_url
-        if not resource_id:
-            canonical_url = sanitize_url(str(info.get("webpage_url") or resolved_url))
-            resource_id = self._resolve_resource_id(canonical_url, info, resource_type)
-        if not resource_id:
-            raise NormalizationError("Could not extract TikTok resource id.", context={"url": original_url})
-
-        web_state = await self._load_web_state(canonical_url if canonical_url.startswith("http") else resolved_url)
-        image_selections = tuple(self._extract_image_selections(info, web_state))
-        image_urls = tuple(selection.url for selection in image_selections)
-        audio_url = self._extract_audio_url(info, web_state)
-        video_url = self._extract_video_url(info)
-        thumbnail_url = self._extract_thumbnail_url(info, web_state)
-        title = self._extract_title(info, web_state)
-        author = self._extract_author(info, web_state)
-        duration_sec = self._extract_duration(info, web_state)
-
-        if resource_type == TikTokResourceType.PHOTO_POST and not image_urls:
-            raise NormalizationError("Photo post did not expose any images.", context={"url": original_url})
-        if resource_type == TikTokResourceType.MUSIC_ONLY and audio_url is None:
-            raise NormalizationError("TikTok music link did not expose an audio URL.", context={"url": original_url})
-
-        normalized = NormalizedResource(
-            platform=Platform.TIKTOK,
-            resource_type=resource_type.value,
-            resource_id=resource_id,
-            normalized_key=build_cache_key(Platform.TIKTOK, resource_type.value, resource_id),
-            original_url=original_url,
-            canonical_url=canonical_url or resolved_url,
-            media_kind=self._resolve_media_kind(resource_type, image_urls),
-            title=title,
-            author=author,
-            video_url=video_url,
-            audio_url=audio_url,
-            image_urls=image_urls,
-            image_entries=tuple(
-                VisualMediaEntry(
-                    source_url=image_url,
-                    order=index,
-                    mime_type_hint=f"image/{'jpeg' if self._guess_extension(image_url, default='jpg') == 'jpg' else self._guess_extension(image_url, default='jpg')}",
+            expanded_url = await self._resolve_short_url(url)
+            if expanded_url != original_url:
+                log_event(
+                    self._logger,
+                    20,
+                    "tiktok_url_expanded",
+                    original_url=original_url,
+                    expanded_url=expanded_url,
                 )
-                for index, image_url in enumerate(image_urls, start=1)
-            ),
-            thumbnail_url=thumbnail_url,
-            duration_sec=duration_sec,
-            has_expected_audio=audio_url is not None if resource_type != TikTokResourceType.VIDEO else None,
+
+            cleaned_url = sanitize_url(expanded_url)
+            if cleaned_url != expanded_url:
+                log_event(
+                    self._logger,
+                    20,
+                    "tiktok_url_cleaned",
+                    original_url=original_url,
+                    expanded_url=expanded_url,
+                    cleaned_url=cleaned_url,
+                )
+
+            info: dict[str, object] = {}
+            try:
+                info = await self._downloader.probe_url(cleaned_url)
+            except DownloadError as exc:
+                log_event(
+                    self._logger,
+                    30,
+                    "tiktok_probe_failed",
+                    original_url=original_url,
+                    expanded_url=expanded_url,
+                    cleaned_url=cleaned_url,
+                    reason=str(exc),
+                )
+                info = {}
+
+            resource_type = self._resolve_resource_type(cleaned_url, info)
+            resource_id = self._resolve_resource_id(cleaned_url, info, resource_type)
+            canonical_url = cleaned_url
+            if not resource_id:
+                canonical_url = sanitize_url(str(info.get("webpage_url") or cleaned_url))
+                resource_type = self._resolve_resource_type(canonical_url, info)
+                resource_id = self._resolve_resource_id(canonical_url, info, resource_type)
+            if not resource_id:
+                raise NormalizationError(
+                    "Could not extract TikTok resource id.",
+                    context={"url": original_url, "expanded_url": expanded_url, "cleaned_url": canonical_url},
+                )
+
+            web_state = await self._load_web_state(canonical_url)
+            image_selections = tuple(self._extract_image_selections(info, web_state))
+            image_urls = tuple(selection.url for selection in image_selections)
+            audio_url = self._extract_audio_url(info, web_state)
+            video_url = self._extract_video_url(info)
+            thumbnail_url = self._extract_thumbnail_url(info, web_state)
+            title = self._extract_title(info, web_state)
+            author = self._extract_author(info, web_state)
+            duration_sec = self._extract_duration(info, web_state)
+
+            if resource_type == TikTokResourceType.PHOTO_POST and not image_urls:
+                raise NormalizationError(
+                    "Photo post did not expose any images.",
+                    context={"url": original_url, "expanded_url": expanded_url, "cleaned_url": canonical_url},
+                )
+            if resource_type == TikTokResourceType.MUSIC_ONLY and audio_url is None:
+                raise NormalizationError(
+                    "TikTok music link did not expose an audio URL.",
+                    context={"url": original_url, "expanded_url": expanded_url, "cleaned_url": canonical_url},
+                )
+
+            normalized = NormalizedResource(
+                platform=Platform.TIKTOK,
+                resource_type=resource_type.value,
+                resource_id=resource_id,
+                normalized_key=build_cache_key(Platform.TIKTOK, resource_type.value, resource_id),
+                original_url=original_url,
+                canonical_url=canonical_url,
+                media_kind=self._resolve_media_kind(resource_type, image_urls),
+                title=title,
+                author=author,
+                video_url=video_url,
+                audio_url=audio_url,
+                image_urls=image_urls,
+                image_entries=tuple(
+                    VisualMediaEntry(
+                        source_url=image_url,
+                        order=index,
+                        mime_type_hint=f"image/{'jpeg' if self._guess_extension(image_url, default='jpg') == 'jpg' else self._guess_extension(image_url, default='jpg')}",
+                    )
+                    for index, image_url in enumerate(image_urls, start=1)
+                ),
+                thumbnail_url=thumbnail_url,
+                duration_sec=duration_sec,
+                has_expected_audio=audio_url is not None if resource_type != TikTokResourceType.VIDEO else None,
+            )
+        except httpx.HTTPError as exc:
+            log_event(
+                self._logger,
+                40,
+                "tiktok_normalization_failed",
+                original_url=original_url,
+                expanded_url=expanded_url,
+                cleaned_url=cleaned_url,
+                reason=str(exc),
+            )
+            raise NormalizationError(
+                "Failed to resolve TikTok short URL.",
+                context={"url": original_url, "expanded_url": expanded_url, "cleaned_url": cleaned_url},
+            ) from exc
+        except (NormalizationError, UnsupportedUrlError) as exc:
+            log_event(
+                self._logger,
+                40,
+                "tiktok_normalization_failed",
+                original_url=original_url,
+                expanded_url=expanded_url,
+                cleaned_url=cleaned_url,
+                reason=str(exc),
+            )
+            raise
+
+        log_event(
+            self._logger,
+            20,
+            "tiktok_url_normalized",
+            original_url=original_url,
+            expanded_url=expanded_url,
+            cleaned_url=cleaned_url,
+            canonical_url=normalized.canonical_url,
+            resource_type=normalized.resource_type,
+            normalized_key=normalized.normalized_key,
         )
         log_event(
             self._logger,
@@ -245,7 +319,7 @@ class TikTokProvider:
     async def _resolve_short_url(self, url: str) -> str:
         host = (urlparse(url).hostname or "").lower()
         if host not in {"vm.tiktok.com", "vt.tiktok.com"}:
-            return sanitize_url(url)
+            return url
         async with httpx.AsyncClient(follow_redirects=True, timeout=self._request_timeout_seconds) as client:
             response = await client.get(
                 url,
@@ -257,7 +331,7 @@ class TikTokProvider:
                 },
             )
             response.raise_for_status()
-            return sanitize_url(str(response.url))
+            return str(response.url)
 
     async def _load_web_state(self, url: str) -> dict[str, object]:
         try:
