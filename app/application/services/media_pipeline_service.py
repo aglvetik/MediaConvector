@@ -37,6 +37,7 @@ class OwnerPipelineResult:
 @dataclass(slots=True)
 class PreparedAudioAsset:
     final_audio_path: Path
+    source_audio_extension: str
     container_extension: str
     telegram_filename: str
     title: str | None
@@ -59,6 +60,9 @@ class PreparedAudioResult:
     asset: PreparedAudioAsset | None = None
     notice: str | None = None
     error_code: str | None = None
+    telegram_filename: str | None = None
+    source_audio_extension: str | None = None
+    final_audio_extension: str | None = None
 
     @property
     def is_prepared(self) -> bool:
@@ -206,7 +210,13 @@ class MediaPipelineService:
             audio_performer=audio_result.asset.performer if audio_result.is_prepared else None,
             audio_duration_sec=audio_result.asset.duration_sec if audio_result.is_prepared else None,
             audio_thumbnail_path=audio_result.asset.thumbnail_path if audio_result.is_prepared else None,
-            audio_filename=audio_result.asset.filename if audio_result.is_prepared else None,
+            audio_filename=audio_result.asset.filename if audio_result.is_prepared else audio_result.telegram_filename,
+            audio_source_extension=(
+                audio_result.asset.source_audio_extension if audio_result.is_prepared else audio_result.source_audio_extension
+            ),
+            audio_final_extension=(
+                audio_result.asset.container_extension if audio_result.is_prepared else audio_result.final_audio_extension
+            ),
             missing_audio_notice=audio_result.notice or messages.NO_AUDIO_TRACK,
         )
         cache_entry = await self._cache_service.save_delivery_result(
@@ -281,7 +291,13 @@ class MediaPipelineService:
                 audio_performer=audio_result.asset.performer if audio_result.is_prepared else None,
                 audio_duration_sec=audio_result.asset.duration_sec if audio_result.is_prepared else None,
                 audio_thumbnail_path=audio_result.asset.thumbnail_path if audio_result.is_prepared else None,
-                audio_filename=audio_result.asset.filename if audio_result.is_prepared else None,
+                audio_filename=audio_result.asset.filename if audio_result.is_prepared else audio_result.telegram_filename,
+                audio_source_extension=(
+                    audio_result.asset.source_audio_extension if audio_result.is_prepared else audio_result.source_audio_extension
+                ),
+                audio_final_extension=(
+                    audio_result.asset.container_extension if audio_result.is_prepared else audio_result.final_audio_extension
+                ),
             )
             cache_entry = await self._cache_service.save_photo_delivery_result(
                 resource=request.normalized_resource,
@@ -335,7 +351,13 @@ class MediaPipelineService:
             performer=audio_result.asset.performer if audio_result.is_prepared else None,
             duration_sec=audio_result.asset.duration_sec if audio_result.is_prepared else None,
             thumbnail_path=audio_result.asset.thumbnail_path if audio_result.is_prepared else None,
-            filename=audio_result.asset.filename if audio_result.is_prepared else None,
+            filename=audio_result.asset.filename if audio_result.is_prepared else audio_result.telegram_filename,
+            source_audio_extension=(
+                audio_result.asset.source_audio_extension if audio_result.is_prepared else audio_result.source_audio_extension
+            ),
+            final_audio_extension=(
+                audio_result.asset.container_extension if audio_result.is_prepared else audio_result.final_audio_extension
+            ),
         )
         if media_result.audio_receipt is not None:
             cache_entry = await self._cache_service.save_audio_only_result(
@@ -416,7 +438,13 @@ class MediaPipelineService:
                 performer=audio_result.asset.performer if audio_result.is_prepared else None,
                 duration_sec=audio_result.asset.duration_sec if audio_result.is_prepared else None,
                 thumbnail_path=audio_result.asset.thumbnail_path if audio_result.is_prepared else None,
-                filename=audio_result.asset.filename if audio_result.is_prepared else None,
+                filename=audio_result.asset.filename if audio_result.is_prepared else audio_result.telegram_filename,
+                source_audio_extension=(
+                    audio_result.asset.source_audio_extension if audio_result.is_prepared else audio_result.source_audio_extension
+                ),
+                final_audio_extension=(
+                    audio_result.asset.container_extension if audio_result.is_prepared else audio_result.final_audio_extension
+                ),
             )
             cache_entry = await self._cache_service.save_audio_refresh(
                 resource=request.normalized_resource,
@@ -756,6 +784,14 @@ class MediaPipelineService:
         preferred_container: Literal["mp3", "source"] = "mp3",
         fallback_cover_path: Path | None = None,
     ) -> PreparedAudioResult:
+        source_extension = self._resolve_audio_extension(source_path)
+        final_extension = "mp3" if preferred_container == "mp3" else source_extension
+        intended_filename = self._build_audio_filename(
+            request,
+            self._resolve_audio_title(request, metadata),
+            self._resolve_audio_performer(request, metadata),
+            extension=final_extension,
+        )
         try:
             asset = await self._build_audio_delivery_asset(
                 request=request,
@@ -765,7 +801,13 @@ class MediaPipelineService:
                 preferred_container=preferred_container,
                 fallback_cover_path=fallback_cover_path,
             )
-            return PreparedAudioResult(status="prepared", asset=asset)
+            return PreparedAudioResult(
+                status="prepared",
+                asset=asset,
+                telegram_filename=asset.telegram_filename,
+                source_audio_extension=asset.source_audio_extension,
+                final_audio_extension=asset.container_extension,
+            )
         except AudioExtractionError as exc:
             result_status: Literal["not_available", "failed_non_fatal", "failed_fatal"]
             if exc.error_code == "no_audio_track":
@@ -778,6 +820,9 @@ class MediaPipelineService:
                 status=result_status,
                 notice=notice,
                 error_code=exc.error_code,
+                telegram_filename=intended_filename,
+                source_audio_extension=source_extension,
+                final_audio_extension=final_extension,
             )
         except Exception as exc:
             log_event(
@@ -793,6 +838,9 @@ class MediaPipelineService:
                 status="failed_fatal" if fatal_on_failure else "failed_non_fatal",
                 notice=messages.TEMPORARY_DOWNLOAD_ERROR if fatal_on_failure else failure_notice,
                 error_code=getattr(exc, "error_code", "audio_prepare_failed"),
+                telegram_filename=intended_filename,
+                source_audio_extension=source_extension,
+                final_audio_extension=final_extension,
             )
 
     async def _build_audio_delivery_asset(
@@ -868,6 +916,7 @@ class MediaPipelineService:
             )
         return PreparedAudioAsset(
             final_audio_path=prepared,
+            source_audio_extension=source_extension,
             container_extension=final_extension,
             telegram_filename=filename,
             title=title,

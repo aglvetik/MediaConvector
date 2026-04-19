@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pytest
 
+from app.domain.entities.media_result import DeliveryReceipt, MediaMetadata, MediaResult
 from app.domain.entities.media_request import MediaRequest
-from app.domain.entities.media_result import MediaMetadata
 from app.domain.entities.normalized_resource import NormalizedResource
+from app.domain.enums.cache_status import CacheStatus
+from app.domain.enums.delivery_status import DeliveryStatus
 from app.domain.enums.platform import Platform
 
 
@@ -55,6 +57,7 @@ async def test_tiktok_music_fallback_m4a_is_prepared_as_real_mp3(service_harness
 
     assert asset.final_audio_path.suffix.lower() == ".mp3"
     assert asset.telegram_filename.endswith(".mp3")
+    assert asset.source_audio_extension == "m4a"
     assert asset.container_extension == "mp3"
     assert asset.final_audio_path.exists()
     assert service_harness.ffmpeg.calls["transcode:tiktok:music_only:123456"] == 1
@@ -83,8 +86,113 @@ async def test_tiktok_music_fallback_can_keep_consistent_m4a_when_conversion_dis
 
     assert asset.final_audio_path.suffix.lower() == ".m4a"
     assert asset.telegram_filename.endswith(".m4a")
+    assert asset.source_audio_extension == "m4a"
     assert asset.container_extension == "m4a"
     assert service_harness.ffmpeg.calls.get("transcode:tiktok:music_only:123456", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_music_only_pipeline_routes_final_prepared_audio_to_audio_delivery(service_harness) -> None:
+    request = _build_music_request()
+    captured: dict[str, object] = {}
+
+    async def fake_deliver_audio_only(request_arg, audio_path, **kwargs):
+        captured["resource_type"] = request_arg.normalized_resource.resource_type
+        captured["audio_path"] = audio_path
+        captured["filename"] = kwargs["filename"]
+        captured["source_audio_extension"] = kwargs["source_audio_extension"]
+        captured["final_audio_extension"] = kwargs["final_audio_extension"]
+        return MediaResult(
+            delivery_status=DeliveryStatus.SENT_AUDIO,
+            cache_status=CacheStatus.READY,
+            video_receipt=None,
+            audio_receipt=DeliveryReceipt(file_id="audio:ok", file_unique_id="audio-unique:ok", size_bytes=123),
+            has_audio=True,
+            cache_hit=False,
+        )
+
+    service_harness.delivery_service.deliver_audio_only = fake_deliver_audio_only  # type: ignore[method-assign]
+
+    result = await service_harness.media_pipeline_service.process(request, service_harness.provider)
+
+    assert result.audio_receipt is not None
+    assert captured["resource_type"] == "music_only"
+    assert isinstance(captured["audio_path"], Path)
+    assert captured["audio_path"].suffix.lower() == ".mp3"
+    assert str(captured["filename"]).endswith(".mp3")
+    assert captured["source_audio_extension"] == "m4a"
+    assert captured["final_audio_extension"] == "mp3"
+
+
+@pytest.mark.asyncio
+async def test_music_only_delivery_logs_started_and_finished(service_harness, tmp_path: Path, monkeypatch) -> None:
+    request = _build_music_request()
+    audio_path = tmp_path / "prepared.mp3"
+    audio_path.write_bytes(b"mp3-bytes")
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def fake_log_event(logger, level, event_name, **fields) -> None:
+        del logger, level
+        events.append((event_name, fields))
+
+    monkeypatch.setattr("app.application.services.delivery_service.log_event", fake_log_event)
+
+    result = await service_harness.delivery_service.deliver_audio_only(
+        request,
+        audio_path,
+        title="Original sound",
+        performer="Creator",
+        duration_sec=15,
+        filename="Creator - Original sound.mp3",
+        source_audio_extension="m4a",
+        final_audio_extension="mp3",
+    )
+
+    assert result.audio_receipt is not None
+    event_names = [event_name for event_name, _ in events]
+    assert "telegram_audio_validation_started" in event_names
+    assert "telegram_send_audio_started" in event_names
+    assert "telegram_send_audio_finished" in event_names
+
+
+@pytest.mark.asyncio
+async def test_music_only_validation_failure_logs_context(service_harness, tmp_path: Path, monkeypatch) -> None:
+    request = _build_music_request()
+    audio_path = tmp_path / "prepared.m4a"
+    audio_path.write_bytes(b"m4a-bytes")
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def fake_log_event(logger, level, event_name, **fields) -> None:
+        del logger, level
+        events.append((event_name, fields))
+
+    monkeypatch.setattr("app.application.services.delivery_service.log_event", fake_log_event)
+
+    result = await service_harness.delivery_service.deliver_audio_only(
+        request,
+        audio_path,
+        title="Original sound",
+        performer="Creator",
+        duration_sec=15,
+        filename="Creator - Original sound.mp3",
+        source_audio_extension="m4a",
+        final_audio_extension="mp3",
+    )
+
+    assert result.audio_receipt is None
+    validation_events = [fields for event_name, fields in events if event_name == "telegram_audio_validation_failed"]
+    assert len(validation_events) == 1
+    failure = validation_events[0]
+    assert failure["normalized_key"] == "tiktok:music_only:123456"
+    assert failure["resource_type"] == "music_only"
+    assert failure["final_audio_path"] == str(audio_path)
+    assert failure["audio_file_exists"] is True
+    assert failure["audio_file_size"] == audio_path.stat().st_size
+    assert failure["telegram_filename"] == "Creator - Original sound.mp3"
+    assert failure["source_audio_extension"] == "m4a"
+    assert failure["final_audio_extension"] == "mp3"
+    assert failure["mismatch_reason"] == "extension_mismatch"
+    assert "telegram_send_audio_started" not in [event_name for event_name, _ in events]
 
 
 @pytest.mark.asyncio
@@ -108,6 +216,8 @@ async def test_audio_delivery_failure_logging_includes_exception_and_file_contex
         performer="Creator",
         duration_sec=15,
         filename="Creator - Original sound.mp3",
+        source_audio_extension="m4a",
+        final_audio_extension="mp3",
     )
 
     assert result.audio_receipt is None

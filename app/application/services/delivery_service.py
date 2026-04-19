@@ -78,6 +78,8 @@ class DeliveryService:
         audio_duration_sec: int | None = None,
         audio_thumbnail_path: Path | None = None,
         audio_filename: str | None = None,
+        audio_source_extension: str | None = None,
+        audio_final_extension: str | None = None,
         missing_audio_notice: str = messages.NO_AUDIO_TRACK,
     ) -> MediaResult:
         log_event(
@@ -125,6 +127,8 @@ class DeliveryService:
             duration_sec=audio_duration_sec,
             thumbnail_path=audio_thumbnail_path,
             filename=audio_filename,
+            source_audio_extension=audio_source_extension,
+            final_audio_extension=audio_final_extension,
         )
         result = self._build_result(
             primary_sent=True,
@@ -161,6 +165,8 @@ class DeliveryService:
         audio_duration_sec: int | None = None,
         audio_thumbnail_path: Path | None = None,
         audio_filename: str | None = None,
+        audio_source_extension: str | None = None,
+        audio_final_extension: str | None = None,
     ) -> MediaResult:
         log_event(
             self._logger,
@@ -201,6 +207,8 @@ class DeliveryService:
                 duration_sec=audio_duration_sec,
                 thumbnail_path=audio_thumbnail_path,
                 filename=audio_filename,
+                source_audio_extension=audio_source_extension,
+                final_audio_extension=audio_final_extension,
             )
         result = self._build_result(
             primary_sent=bool(photo_receipts),
@@ -248,6 +256,8 @@ class DeliveryService:
         duration_sec: int | None = None,
         thumbnail_path: Path | None = None,
         filename: str | None = None,
+        source_audio_extension: str | None = None,
+        final_audio_extension: str | None = None,
         failure_notice: str = messages.SEPARATE_AUDIO_SEND_FAILED,
         cache_hit: bool = False,
     ) -> MediaResult:
@@ -263,6 +273,16 @@ class DeliveryService:
             resource_type=request.normalized_resource.resource_type,
         )
         if audio_path is None:
+            self._log_audio_validation_failed(
+                request=request,
+                audio_path=None,
+                filename=filename,
+                cached=cache_hit,
+                resource_type=request.normalized_resource.resource_type,
+                source_audio_extension=source_audio_extension,
+                final_audio_extension=final_audio_extension,
+                mismatch_reason="prepared_audio_missing",
+            )
             await self._gateway.send_text(request.chat_id, missing_audio_notice, request.message_id)
             result = self._build_result(
                 primary_sent=primary_delivered,
@@ -286,6 +306,15 @@ class DeliveryService:
             return result
 
         try:
+            self._log_audio_validation_started(
+                request=request,
+                audio_path=audio_path,
+                filename=filename,
+                cached=cache_hit,
+                resource_type=request.normalized_resource.resource_type,
+                source_audio_extension=source_audio_extension,
+                final_audio_extension=final_audio_extension,
+            )
             self._validate_audio_upload(audio_path, filename)
             log_event(
                 self._logger,
@@ -330,13 +359,25 @@ class DeliveryService:
                 cached=cache_hit,
             )
         except AppError as exc:
-            self._log_audio_send_failure(
-                request=request,
-                exc=exc,
-                audio_path=audio_path,
-                filename=filename,
-                cached=cache_hit,
-            )
+            if self._is_audio_validation_error(exc):
+                self._log_audio_validation_failed(
+                    request=request,
+                    audio_path=audio_path,
+                    filename=filename,
+                    cached=cache_hit,
+                    resource_type=request.normalized_resource.resource_type,
+                    source_audio_extension=source_audio_extension,
+                    final_audio_extension=final_audio_extension,
+                    mismatch_reason=str(exc.context.get("mismatch_reason") or exc.error_code),
+                )
+            else:
+                self._log_audio_send_failure(
+                    request=request,
+                    exc=exc,
+                    audio_path=audio_path,
+                    filename=filename,
+                    cached=cache_hit,
+                )
             notice = exc.user_message or failure_notice
             await self._gateway.send_text(request.chat_id, notice, request.message_id)
             result = self._build_result(
@@ -720,9 +761,21 @@ class DeliveryService:
         duration_sec: int | None = None,
         thumbnail_path: Path | None = None,
         filename: str | None = None,
+        source_audio_extension: str | None = None,
+        final_audio_extension: str | None = None,
     ) -> tuple[DeliveryReceipt | None, str | None]:
         if audio_path is None:
             if missing_audio_notice is not None:
+                self._log_audio_validation_failed(
+                    request=request,
+                    audio_path=None,
+                    filename=filename,
+                    cached=False,
+                    resource_type=request.normalized_resource.resource_type,
+                    source_audio_extension=source_audio_extension,
+                    final_audio_extension=final_audio_extension,
+                    mismatch_reason="prepared_audio_missing",
+                )
                 await self._gateway.send_text(request.chat_id, missing_audio_notice, request.message_id)
                 log_event(
                     self._logger,
@@ -736,6 +789,15 @@ class DeliveryService:
             return None, missing_audio_notice
 
         try:
+            self._log_audio_validation_started(
+                request=request,
+                audio_path=audio_path,
+                filename=filename,
+                cached=False,
+                resource_type=request.normalized_resource.resource_type,
+                source_audio_extension=source_audio_extension,
+                final_audio_extension=final_audio_extension,
+            )
             self._validate_audio_upload(audio_path, filename)
             log_event(
                 self._logger,
@@ -781,13 +843,25 @@ class DeliveryService:
             )
             return audio_receipt, None
         except AppError as exc:
-            self._log_audio_send_failure(
-                request=request,
-                exc=exc,
-                audio_path=audio_path,
-                filename=filename,
-                cached=False,
-            )
+            if self._is_audio_validation_error(exc):
+                self._log_audio_validation_failed(
+                    request=request,
+                    audio_path=audio_path,
+                    filename=filename,
+                    cached=False,
+                    resource_type=request.normalized_resource.resource_type,
+                    source_audio_extension=source_audio_extension,
+                    final_audio_extension=final_audio_extension,
+                    mismatch_reason=str(exc.context.get("mismatch_reason") or exc.error_code),
+                )
+            else:
+                self._log_audio_send_failure(
+                    request=request,
+                    exc=exc,
+                    audio_path=audio_path,
+                    filename=filename,
+                    cached=False,
+                )
             notice = exc.user_message or messages.SEPARATE_AUDIO_SEND_FAILED
             await self._gateway.send_text(request.chat_id, notice, request.message_id)
             log_event(
@@ -953,7 +1027,7 @@ class DeliveryService:
                 message="Prepared audio file is missing.",
                 user_message=messages.TEMPORARY_DOWNLOAD_ERROR,
                 error_code="audio_file_missing",
-                context=self._audio_file_context(audio_path, filename),
+                context={**self._audio_file_context(audio_path, filename), "mismatch_reason": "file_missing"},
             )
         file_size = audio_path.stat().st_size
         if file_size <= 0:
@@ -961,7 +1035,7 @@ class DeliveryService:
                 message="Prepared audio file is empty.",
                 user_message=messages.TEMPORARY_DOWNLOAD_ERROR,
                 error_code="audio_file_empty",
-                context=self._audio_file_context(audio_path, filename),
+                context={**self._audio_file_context(audio_path, filename), "mismatch_reason": "file_empty"},
             )
         resolved_filename = filename or audio_path.name
         filename_extension = Path(resolved_filename).suffix.lower()
@@ -971,8 +1045,68 @@ class DeliveryService:
                 message="Prepared audio filename extension does not match file extension.",
                 user_message=messages.TEMPORARY_DOWNLOAD_ERROR,
                 error_code="audio_filename_mismatch",
-                context=self._audio_file_context(audio_path, resolved_filename),
+                context={**self._audio_file_context(audio_path, resolved_filename), "mismatch_reason": "extension_mismatch"},
             )
+
+    def _log_audio_validation_started(
+        self,
+        *,
+        request: MediaRequest,
+        audio_path: Path | None,
+        filename: str | None,
+        cached: bool,
+        resource_type: str,
+        source_audio_extension: str | None,
+        final_audio_extension: str | None,
+    ) -> None:
+        context = self._audio_file_context(audio_path, filename)
+        log_event(
+            self._logger,
+            20,
+            "telegram_audio_validation_started",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            cached=cached,
+            resource_type=resource_type,
+            final_audio_path=context["audio_file_path"],
+            audio_file_exists=context["audio_file_exists"],
+            audio_file_size=context["audio_file_size"],
+            telegram_filename=context["audio_filename"],
+            source_audio_extension=source_audio_extension,
+            final_audio_extension=final_audio_extension,
+        )
+
+    def _log_audio_validation_failed(
+        self,
+        *,
+        request: MediaRequest,
+        audio_path: Path | None,
+        filename: str | None,
+        cached: bool,
+        resource_type: str,
+        source_audio_extension: str | None,
+        final_audio_extension: str | None,
+        mismatch_reason: str,
+    ) -> None:
+        context = self._audio_file_context(audio_path, filename)
+        log_event(
+            self._logger,
+            30,
+            "telegram_audio_validation_failed",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            cached=cached,
+            resource_type=resource_type,
+            final_audio_path=context["audio_file_path"],
+            audio_file_exists=context["audio_file_exists"],
+            audio_file_size=context["audio_file_size"],
+            telegram_filename=context["audio_filename"],
+            source_audio_extension=source_audio_extension,
+            final_audio_extension=final_audio_extension,
+            mismatch_reason=mismatch_reason,
+        )
 
     def _log_audio_send_failure(
         self,
@@ -992,6 +1126,7 @@ class DeliveryService:
             chat_id=request.chat_id,
             normalized_key=request.normalized_resource.normalized_key,
             cached=cached,
+            resource_type=request.normalized_resource.resource_type,
             exception_type=type(exc).__name__,
             exception_message=str(exc),
             audio_file_path=context["audio_file_path"],
@@ -999,6 +1134,10 @@ class DeliveryService:
             audio_file_size=context["audio_file_size"],
             audio_filename=context["audio_filename"],
         )
+
+    @staticmethod
+    def _is_audio_validation_error(exc: AppError) -> bool:
+        return exc.error_code in {"audio_file_missing", "audio_file_empty", "audio_filename_mismatch"}
 
     @staticmethod
     def _audio_file_context(audio_path: Path | None, filename: str | None) -> dict[str, object]:
