@@ -11,13 +11,15 @@ import httpx
 
 from app.domain.entities.media_result import MediaMetadata
 from app.domain.entities.normalized_resource import NormalizedResource
+from app.domain.entities.source_media_artifact import SourceMediaArtifact
 from app.domain.entities.visual_media_entry import VisualMediaEntry
 from app.domain.enums.platform import Platform
 from app.domain.enums.tiktok_resource_type import TikTokResourceType
 from app.domain.errors import DownloadError, NormalizationError, UnsupportedUrlError
 from app.domain.policies import build_cache_key
-from app.infrastructure.downloaders import YtDlpClient
+from app.infrastructure.downloaders import GalleryDlClient, YtDlpClient
 from app.infrastructure.logging import get_logger, log_event
+from app.infrastructure.providers.gallery_utils import build_artifact_from_gallery_probe
 from app.infrastructure.providers.tiktok.url_utils import (
     extract_first_tiktok_url,
     extract_music_id,
@@ -57,12 +59,28 @@ class _TikTokImageSelection:
     fallback_fields_considered: bool
 
 
+@dataclass(slots=True)
+class _PreparedGalleryBundle:
+    work_dir: Path
+    image_files: tuple[Path, ...]
+    audio_files: tuple[Path, ...]
+    video_files: tuple[Path, ...]
+
+
 class TikTokProvider:
     platform_name = Platform.TIKTOK.value
 
-    def __init__(self, *, downloader: YtDlpClient, request_timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        *,
+        downloader: YtDlpClient,
+        request_timeout_seconds: int,
+        gallery_downloader: GalleryDlClient | None = None,
+    ) -> None:
         self._downloader = downloader
         self._request_timeout_seconds = request_timeout_seconds
+        self._gallery_downloader = gallery_downloader
+        self._gallery_bundles: dict[str, _PreparedGalleryBundle] = {}
         self._logger = get_logger(__name__)
 
     def extract_first_url(self, text: str) -> str | None:
@@ -137,6 +155,19 @@ class TikTokProvider:
             title = self._extract_title(info, web_state)
             author = self._extract_author(info, web_state)
             duration_sec = self._extract_duration(info, web_state)
+            gallery_artifact = await self._build_gallery_artifact(
+                canonical_url=canonical_url,
+                resource_id=resource_id,
+                title=title,
+                author=author,
+                duration_sec=duration_sec,
+            )
+            if gallery_artifact is not None and resource_type == TikTokResourceType.PHOTO_POST:
+                image_urls = gallery_artifact.image_sources
+                audio_url = audio_url or gallery_artifact.audio_source
+                duration_sec = duration_sec or gallery_artifact.duration_sec
+                title = title or gallery_artifact.title
+                author = author or gallery_artifact.uploader
 
             if resource_type == TikTokResourceType.PHOTO_POST and not image_urls:
                 raise NormalizationError(
@@ -156,13 +187,16 @@ class TikTokProvider:
                 normalized_key=build_cache_key(Platform.TIKTOK, resource_type.value, resource_id),
                 original_url=original_url,
                 canonical_url=canonical_url,
-                media_kind=self._resolve_media_kind(resource_type, image_urls),
+                engine_name="gallery-dl" if resource_type == TikTokResourceType.PHOTO_POST and gallery_artifact is not None else "yt-dlp",
+                media_kind=gallery_artifact.media_kind if gallery_artifact is not None else self._resolve_media_kind(resource_type, image_urls),
                 title=title,
                 author=author,
                 video_url=video_url,
                 audio_url=audio_url,
                 image_urls=image_urls,
-                image_entries=tuple(
+                image_entries=gallery_artifact.image_entries
+                if gallery_artifact is not None
+                else tuple(
                     VisualMediaEntry(
                         source_url=image_url,
                         order=index,
@@ -275,6 +309,11 @@ class TikTokProvider:
         return path
 
     async def download_audio(self, normalized: NormalizedResource, work_dir: Path) -> Path | None:
+        if normalized.resource_type == TikTokResourceType.PHOTO_POST.value and normalized.engine_name == "gallery-dl":
+            bundle = await self._ensure_gallery_bundle(normalized, work_dir)
+            if bundle.audio_files:
+                return bundle.audio_files[0]
+            return None
         if normalized.audio_url is None:
             return None
         extension = self._guess_extension(normalized.audio_url, default="m4a")
@@ -290,6 +329,15 @@ class TikTokProvider:
         source_url: str,
         entry_index: int,
     ) -> Path:
+        if normalized.resource_type == TikTokResourceType.PHOTO_POST.value and normalized.engine_name == "gallery-dl":
+            bundle = await self._ensure_gallery_bundle(normalized, work_dir)
+            if entry_index < 1 or entry_index > len(bundle.image_files):
+                raise DownloadError(
+                    "Requested gallery entry is unavailable.",
+                    temporary=False,
+                    context={"normalized_key": normalized.normalized_key, "entry_index": entry_index},
+                )
+            return bundle.image_files[entry_index - 1]
         normalized_url = self._normalize_image_url(source_url)
         image_path = work_dir / f"{normalized.resource_id}-photo-{entry_index}.{self._guess_extension(normalized_url, default='jpg')}"
         await self._download_binary(
@@ -302,6 +350,15 @@ class TikTokProvider:
         return image_path
 
     async def download_images(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, ...]:
+        if normalized.resource_type == TikTokResourceType.PHOTO_POST.value and normalized.engine_name == "gallery-dl":
+            bundle = await self._ensure_gallery_bundle(normalized, work_dir)
+            if not bundle.image_files:
+                raise DownloadError(
+                    "gallery-dl did not download image files.",
+                    temporary=False,
+                    context={"normalized_key": normalized.normalized_key},
+                )
+            return bundle.image_files
         paths: list[Path] = []
         for index, image_url in enumerate(normalized.image_urls, start=1):
             image_path = await self.download_image_entry(
@@ -315,6 +372,86 @@ class TikTokProvider:
 
     async def download_with_metadata(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, MediaMetadata]:
         return await self._downloader.download_video(normalized, work_dir)
+
+    async def _build_gallery_artifact(
+        self,
+        *,
+        canonical_url: str,
+        resource_id: str,
+        title: str | None,
+        author: str | None,
+        duration_sec: int | None,
+    ) -> SourceMediaArtifact | None:
+        if self._gallery_downloader is None:
+            return None
+        try:
+            probe_entries = await self._gallery_downloader.probe_url(canonical_url)
+        except DownloadError as exc:
+            log_event(
+                self._logger,
+                30,
+                "gallery_probe_failed",
+                canonical_url=canonical_url,
+                source_type=Platform.TIKTOK.value,
+                error_code=exc.error_code,
+            )
+            return None
+        artifact = build_artifact_from_gallery_probe(
+            platform=Platform.TIKTOK,
+            original_url=canonical_url,
+            canonical_url=canonical_url,
+            source_id=resource_id,
+            probe_entries=probe_entries,
+            fallback_title=title,
+            fallback_uploader=author,
+        )
+        if artifact is not None and artifact.media_kind not in {"photo", "gallery"}:
+            return None
+        return artifact
+
+    async def _ensure_gallery_bundle(self, normalized: NormalizedResource, work_dir: Path) -> _PreparedGalleryBundle:
+        if self._gallery_downloader is None:
+            raise DownloadError(
+                "gallery-dl is not configured for TikTok photo posts.",
+                temporary=False,
+                context={"normalized_key": normalized.normalized_key},
+            )
+        existing = self._gallery_bundles.get(normalized.normalized_key)
+        if existing is not None and existing.work_dir == work_dir and all(path.exists() for path in (*existing.image_files, *existing.audio_files, *existing.video_files)):
+            return existing
+
+        log_event(
+            self._logger,
+            20,
+            "media_download_started",
+            normalized_key=normalized.normalized_key,
+            source_type=Platform.TIKTOK.value,
+            canonical_url=normalized.canonical_url,
+            media_kind=normalized.media_kind,
+            engine_name="gallery-dl",
+        )
+        collection = await self._gallery_downloader.download_collection(normalized.canonical_url, work_dir)
+        bundle = _PreparedGalleryBundle(
+            work_dir=work_dir,
+            image_files=collection.image_files,
+            audio_files=collection.audio_files,
+            video_files=collection.video_files,
+        )
+        self._gallery_bundles[normalized.normalized_key] = bundle
+        log_event(
+            self._logger,
+            20,
+            "media_download_finished",
+            normalized_key=normalized.normalized_key,
+            source_type=Platform.TIKTOK.value,
+            canonical_url=normalized.canonical_url,
+            media_kind=normalized.media_kind,
+            engine_name="gallery-dl",
+            image_count=len(bundle.image_files),
+            audio_count=len(bundle.audio_files),
+            video_count=len(bundle.video_files),
+        )
+        return bundle
 
     async def _resolve_short_url(self, url: str) -> str:
         host = (urlparse(url).hostname or "").lower()

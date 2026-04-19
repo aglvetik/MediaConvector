@@ -17,7 +17,7 @@ from app.application.services import (
     UserRequestGuardService,
 )
 from app.config import Settings
-from app.infrastructure.downloaders import YtDlpClient
+from app.infrastructure.downloaders import GalleryDlClient, YtDlpClient
 from app.infrastructure.logging import get_logger
 from app.infrastructure.media import FfmpegAdapter
 from app.infrastructure.persistence.sqlite import (
@@ -28,7 +28,7 @@ from app.infrastructure.persistence.sqlite import (
     SqlAlchemyRequestLogRepository,
 )
 from app.domain.enums.platform import Platform
-from app.infrastructure.providers import TikTokProvider, YtDlpUrlProvider
+from app.infrastructure.providers import GalleryDlUrlProvider, RoutedUrlProvider, TikTokProvider, YtDlpUrlProvider
 from app.infrastructure.telegram import AiogramTelegramGateway
 from app.infrastructure.temp import TempFileManager
 from app.workers import CleanupWorker, HealthWorker
@@ -69,6 +69,7 @@ def build_container(settings: Settings) -> AppContainer:
             "cookies_exists": cookies_file.exists() if cookies_file is not None else False,
             "ffmpeg": settings.ffmpeg_path,
             "ytdlp": settings.ytdlp_path,
+            "gallerydl": settings.gallerydl_path,
         },
     )
 
@@ -87,6 +88,12 @@ def build_container(settings: Settings) -> AppContainer:
         semaphore=download_semaphore,
         cookies_file=cookies_file,
     )
+    gallerydl_client = GalleryDlClient(
+        binary_path=settings.gallerydl_path,
+        timeout_seconds=settings.download_timeout_seconds,
+        semaphore=download_semaphore,
+        cookies_file=cookies_file,
+    )
     ffmpeg_adapter = FfmpegAdapter(
         ffmpeg_path=settings.ffmpeg_path,
         timeout_seconds=settings.request_timeout_seconds,
@@ -95,36 +102,85 @@ def build_container(settings: Settings) -> AppContainer:
     tiktok_provider = TikTokProvider(
         downloader=ytdlp_client,
         request_timeout_seconds=settings.request_timeout_seconds,
+        gallery_downloader=gallerydl_client,
     )
-    youtube_provider = YtDlpUrlProvider(
+    youtube_provider = RoutedUrlProvider(
         platform=Platform.YOUTUBE,
-        downloader=ytdlp_client,
-        request_timeout_seconds=settings.request_timeout_seconds,
+        ytdlp_provider=YtDlpUrlProvider(
+            platform=Platform.YOUTUBE,
+            downloader=ytdlp_client,
+            request_timeout_seconds=settings.request_timeout_seconds,
+        ),
+        gallery_provider=GalleryDlUrlProvider(
+            platform=Platform.YOUTUBE,
+            downloader=gallerydl_client,
+            request_timeout_seconds=settings.request_timeout_seconds,
+        ),
     )
-    instagram_provider = YtDlpUrlProvider(
+    instagram_provider = RoutedUrlProvider(
         platform=Platform.INSTAGRAM,
-        downloader=ytdlp_client,
-        request_timeout_seconds=settings.request_timeout_seconds,
+        ytdlp_provider=YtDlpUrlProvider(
+            platform=Platform.INSTAGRAM,
+            downloader=ytdlp_client,
+            request_timeout_seconds=settings.request_timeout_seconds,
+        ),
+        gallery_provider=GalleryDlUrlProvider(
+            platform=Platform.INSTAGRAM,
+            downloader=gallerydl_client,
+            request_timeout_seconds=settings.request_timeout_seconds,
+        ),
     )
-    facebook_provider = YtDlpUrlProvider(
+    facebook_provider = RoutedUrlProvider(
         platform=Platform.FACEBOOK,
-        downloader=ytdlp_client,
-        request_timeout_seconds=settings.request_timeout_seconds,
+        ytdlp_provider=YtDlpUrlProvider(
+            platform=Platform.FACEBOOK,
+            downloader=ytdlp_client,
+            request_timeout_seconds=settings.request_timeout_seconds,
+        ),
+        gallery_provider=GalleryDlUrlProvider(
+            platform=Platform.FACEBOOK,
+            downloader=gallerydl_client,
+            request_timeout_seconds=settings.request_timeout_seconds,
+        ),
     )
-    pinterest_provider = YtDlpUrlProvider(
+    pinterest_provider = RoutedUrlProvider(
         platform=Platform.PINTEREST,
-        downloader=ytdlp_client,
-        request_timeout_seconds=settings.request_timeout_seconds,
+        ytdlp_provider=YtDlpUrlProvider(
+            platform=Platform.PINTEREST,
+            downloader=ytdlp_client,
+            request_timeout_seconds=settings.request_timeout_seconds,
+        ),
+        gallery_provider=GalleryDlUrlProvider(
+            platform=Platform.PINTEREST,
+            downloader=gallerydl_client,
+            request_timeout_seconds=settings.request_timeout_seconds,
+        ),
     )
-    rutube_provider = YtDlpUrlProvider(
+    rutube_provider = RoutedUrlProvider(
         platform=Platform.RUTUBE,
-        downloader=ytdlp_client,
-        request_timeout_seconds=settings.request_timeout_seconds,
+        ytdlp_provider=YtDlpUrlProvider(
+            platform=Platform.RUTUBE,
+            downloader=ytdlp_client,
+            request_timeout_seconds=settings.request_timeout_seconds,
+        ),
+        gallery_provider=GalleryDlUrlProvider(
+            platform=Platform.RUTUBE,
+            downloader=gallerydl_client,
+            request_timeout_seconds=settings.request_timeout_seconds,
+        ),
     )
-    likee_provider = YtDlpUrlProvider(
+    likee_provider = RoutedUrlProvider(
         platform=Platform.LIKEE,
-        downloader=ytdlp_client,
-        request_timeout_seconds=settings.request_timeout_seconds,
+        ytdlp_provider=YtDlpUrlProvider(
+            platform=Platform.LIKEE,
+            downloader=ytdlp_client,
+            request_timeout_seconds=settings.request_timeout_seconds,
+        ),
+        gallery_provider=GalleryDlUrlProvider(
+            platform=Platform.LIKEE,
+            downloader=gallerydl_client,
+            request_timeout_seconds=settings.request_timeout_seconds,
+        ),
     )
 
     metrics_service = MetricsService()
@@ -174,6 +230,7 @@ def build_container(settings: Settings) -> AppContainer:
         telegram_gateway=gateway,
         ffmpeg_path=settings.ffmpeg_path,
         ytdlp_path=settings.ytdlp_path,
+        gallerydl_path=settings.gallerydl_path,
         job_stale_after_minutes=settings.job_stale_after_minutes,
     )
     cleanup_worker = CleanupWorker(

@@ -18,6 +18,16 @@ class StubDownloader:
         return dict(self._info)
 
 
+class StubGalleryDownloader:
+    def __init__(self, entries: tuple[dict[str, object], ...]) -> None:
+        self._entries = entries
+        self.probe_urls: list[str] = []
+
+    async def probe_url(self, url: str) -> tuple[dict[str, object], ...]:
+        self.probe_urls.append(url)
+        return self._entries
+
+
 @pytest.mark.asyncio
 async def test_tiktok_photo_normalization_prefers_structured_image_url_list_over_raw_entry_url(monkeypatch) -> None:
     provider = TikTokProvider(
@@ -199,6 +209,7 @@ async def test_vm_tiktok_short_link_normalizes_to_canonical_video_url(monkeypatc
     assert normalized.canonical_url == "https://www.tiktok.com/@username/video/7600774477374393617"
     assert normalized.normalized_key == "tiktok:video:7600774477374393617"
     assert downloader.probe_urls == ["https://www.tiktok.com/@username/video/7600774477374393617"]
+    assert normalized.engine_name == "yt-dlp"
 
 
 @pytest.mark.asyncio
@@ -232,6 +243,45 @@ async def test_vm_tiktok_short_link_normalizes_to_canonical_photo_url(monkeypatc
     assert normalized.canonical_url == "https://www.tiktok.com/@username/photo/7600774477374393618"
     assert normalized.normalized_key == "tiktok:photo_post:7600774477374393618"
     assert downloader.probe_urls == ["https://www.tiktok.com/@username/photo/7600774477374393618"]
+
+
+@pytest.mark.asyncio
+async def test_tiktok_photo_normalization_prefers_gallery_dl_engine_when_configured(monkeypatch) -> None:
+    downloader = StubDownloader(
+        {
+            "id": "7600774477374393618",
+            "entries": [
+                {"url": "https://cdn.example/fallback-1.webp"},
+                {"url": "https://cdn.example/fallback-2.webp"},
+            ],
+        }
+    )
+    gallery_downloader = StubGalleryDownloader(
+        (
+            {"id": "7600774477374393618", "title": "Photo post", "author": "Poster", "url": "https://gallery.example/1.jpg", "extension": "jpg"},
+            {"id": "7600774477374393618", "title": "Photo post", "author": "Poster", "url": "https://gallery.example/2.jpg", "extension": "jpg"},
+        )
+    )
+    provider = TikTokProvider(
+        downloader=downloader,
+        request_timeout_seconds=10,
+        gallery_downloader=gallery_downloader,
+    )
+
+    async def fake_resolve_short_url(url: str) -> str:
+        return url
+
+    async def fake_load_web_state(url: str) -> dict[str, object]:
+        return {}
+
+    monkeypatch.setattr(provider, "_resolve_short_url", fake_resolve_short_url)
+    monkeypatch.setattr(provider, "_load_web_state", fake_load_web_state)
+
+    normalized = await provider.normalize("https://www.tiktok.com/@username/photo/7600774477374393618")
+
+    assert normalized.engine_name == "gallery-dl"
+    assert normalized.image_urls == ("https://gallery.example/1.jpg", "https://gallery.example/2.jpg")
+    assert gallery_downloader.probe_urls == ["https://www.tiktok.com/@username/photo/7600774477374393618"]
 
 
 @pytest.mark.asyncio

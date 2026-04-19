@@ -1,8 +1,8 @@
-# Multi-Source Telegram Media Downloader Bot
+# Multi-Source Telegram URL Downloader Bot
 
 Production-oriented Telegram bot for Python 3.11 that downloads public media links and sends them back to Telegram.
 
-The bot works from ordinary text messages with URLs. It detects the first supported public link, downloads the media, sends the right Telegram media type, and reuses Telegram `file_id` cache for repeated requests.
+The bot works from ordinary text messages with URLs. It detects the first supported public link, normalizes it into a shared media artifact, downloads the media with the right engine, sends the appropriate Telegram media type, and reuses Telegram `file_id` cache for repeated requests.
 
 ## Supported Sources
 
@@ -14,20 +14,40 @@ The bot works from ordinary text messages with URLs. It detects the first suppor
 - Rutube
 - Likee
 
+## Engine Split
+
+This project now uses two download engines on purpose:
+
+- `yt-dlp` for video and audio-first URLs
+- `gallery-dl` for image, gallery, and slideshow URLs
+
+In practice:
+
+- TikTok video posts -> `yt-dlp`
+- TikTok photo/slideshow posts -> `gallery-dl`
+- YouTube video URLs -> `yt-dlp`
+- Instagram reels/videos -> `yt-dlp`
+- Instagram image posts/carousels -> `gallery-dl`
+- Facebook videos/reels -> `yt-dlp`
+- Facebook image/gallery-style posts -> `gallery-dl` when extractable
+- Pinterest image pins/galleries -> `gallery-dl`
+- Rutube videos -> `yt-dlp`
+- Likee videos/audio-first URLs -> `yt-dlp`
+
 ## Supported Content Types
 
 - Video posts
   - sends video
-  - tries to extract and send separate audio when the source contains an audio track
-  - if separate audio extraction fails, the video is still sent when possible
+  - tries to extract and send separate audio when an audio track exists
+  - if separate audio extraction fails, the video can still be sent
 - Image-only posts
   - sends one image as a Telegram photo
-  - sends multi-image posts as a photo group
+  - sends multiple images as a Telegram media group
+- Gallery/slideshow posts
+  - prepares valid entries only
+  - skips broken gallery items when it can still deliver the remaining images
 - Audio-only URLs
   - sends Telegram audio
-- Gallery-like extractor results
-  - normalizes entries
-  - skips invalid items when it can still deliver valid images safely
 
 ## What It Does Not Do
 
@@ -37,31 +57,33 @@ The bot works from ordinary text messages with URLs. It detects the first suppor
 - No paid APIs
 - No cloud backends
 
-The bot is focused on direct public media URLs only.
-
-## Current TikTok Behavior
-
-TikTok support remains first-class:
-
-- video posts -> video + separate audio
-- photo/slideshow posts -> photos + separate audio
-- sound/music links -> audio only
+This bot is focused on direct public media URLs only.
 
 ## Architecture
 
-The project keeps a layered structure:
+The project keeps the layered structure:
 
 - `app/presentation`: aiogram handlers and transport
 - `app/application`: orchestration services and pipelines
 - `app/domain`: entities, enums, policies, interfaces, errors
-- `app/infrastructure`: Telegram gateway, SQLite repositories, ffmpeg, yt-dlp client, providers, temp management, logging
+- `app/infrastructure`: Telegram gateway, SQLite repositories, ffmpeg, yt-dlp, gallery-dl, providers, temp management, logging
 - `app/workers`: cleanup and health workers
+
+Key runtime stages:
+
+1. detect the first supported URL in a message
+2. classify source and content type
+3. choose `yt-dlp` or `gallery-dl`
+4. normalize the result into a shared artifact
+5. deliver video, photo, gallery, or audio through one Telegram delivery layer
+6. reuse cached Telegram `file_id` values when possible
 
 ## Requirements
 
 - Python 3.11
 - ffmpeg installed on the host
 - yt-dlp installed on the host or available in PATH
+- gallery-dl installed on the host or available in PATH
 - Telegram bot token
 - SQLite
 
@@ -84,8 +106,9 @@ Useful settings:
 - `TEMP_DIR`: temp processing directory
 - `FFMPEG_PATH`: ffmpeg binary path
 - `YTDLP_PATH`: yt-dlp binary path
-- `YTDLP_COOKIES_FILE`: optional cookies file for platforms where upstream extraction may require it
-- `MAX_PARALLEL_DOWNLOADS`: network/download concurrency
+- `GALLERYDL_PATH`: gallery-dl binary path
+- `YTDLP_COOKIES_FILE`: optional cookies file for direct extractor flows where upstream behavior may require it
+- `MAX_PARALLEL_DOWNLOADS`: network/download concurrency shared by the engines
 - `MAX_PARALLEL_FFMPEG`: ffmpeg concurrency
 - `USER_REQUESTS_PER_MINUTE`: per-user rate limit
 - `USER_REQUEST_COOLDOWN_SECONDS`: soft cooldown between requests from one user
@@ -104,11 +127,13 @@ python -m app.main
 
 ## Usage
 
-Send a message containing a public supported URL, for example:
+Send a message containing a supported public URL, for example:
 
 - `https://www.tiktok.com/@user/video/1234567890`
+- `https://www.tiktok.com/@user/photo/1234567890`
 - `https://youtu.be/dQw4w9WgXcQ`
 - `https://www.instagram.com/reel/abc123/`
+- `https://www.instagram.com/p/abc123/`
 - `https://www.facebook.com/watch/?v=123456789`
 - `https://www.pinterest.com/pin/123456789/`
 - `https://rutube.ru/video/abcdef123456/`
@@ -118,13 +143,14 @@ The bot will:
 
 1. detect the first supported URL in the message
 2. send `Загрузка 🔎`
-3. normalize the extractor result into video, photo, gallery, or audio
-4. deliver the media to Telegram
-5. reuse cached Telegram `file_id` values on repeated requests when possible
+3. route the URL to `yt-dlp` or `gallery-dl`
+4. normalize the result into video, photo, gallery, or audio
+5. deliver the media to Telegram
+6. reuse cached Telegram `file_id` values on repeated requests when possible
 
 Messages without supported URLs are ignored.
 
-If the message contains only unsupported URLs, the bot replies with a short failure message.
+If a message contains only unsupported URLs, the bot replies with a short failure message.
 
 ## Migrations
 
@@ -134,7 +160,7 @@ Apply all migrations:
 alembic upgrade head
 ```
 
-No additional migration step is needed specifically for the multi-source upgrade beyond the normal migration chain.
+No extra migration is required specifically for the two-engine upgrade.
 
 ## Tests
 
@@ -147,14 +173,15 @@ pytest -q
 The suite covers:
 
 - source detection for supported platforms
+- engine routing by content type
 - TikTok URL extraction and normalization
 - TikTok video, photo/slideshow, and sound-link flows
 - unsupported URL handling
-- generic single video, single photo, gallery, and audio-only flows
+- single-video, single-photo, gallery, and audio-only flows
 - cache reuse and invalid cache rebuild
 - duplicate in-flight handling
 - ffmpeg behavior
-- Telegram gateway behavior
+- Telegram delivery behavior
 - temp-file lifecycle
 
 ## Deployment On Ubuntu
@@ -168,7 +195,7 @@ sudo apt update
 sudo apt install -y python3.11 python3.11-venv ffmpeg
 ```
 
-4. Create virtualenv and install:
+4. Create virtualenv and install Python dependencies:
 
 ```bash
 python3.11 -m venv .venv
@@ -177,13 +204,28 @@ pip install --upgrade pip
 pip install -e ".[dev]"
 ```
 
-5. Apply migrations:
+5. Ensure the binaries are available:
+
+```bash
+which yt-dlp
+which gallery-dl
+which ffmpeg
+```
+
+If `gallery-dl` is not available yet:
+
+```bash
+source .venv/bin/activate
+pip install -U gallery-dl
+```
+
+6. Apply migrations:
 
 ```bash
 alembic upgrade head
 ```
 
-6. Start the bot:
+7. Start the bot:
 
 ```bash
 python -m app.main
@@ -208,21 +250,22 @@ journalctl -u tiktok-downloader-bot -f
 ## Operational Notes
 
 - The bot works with direct public media links only.
-- Cookies are optional and only relevant for some platforms when upstream extractor behavior requires them.
+- Cookies are optional and only relevant for some direct extractor flows.
+- `yt-dlp` is kept focused on video/audio-first extraction.
+- `gallery-dl` is used for photo/gallery/slideshow extraction where that path is more stable.
 - Temporary files are cleaned after processing and by the cleanup worker.
 - SQLite is suitable for a small VPS, but not for larger multi-process deployments.
 
 ## Limitations
 
-- Platform support still depends on upstream site behavior and yt-dlp extractor health.
-- Some platforms can change their public media responses without notice.
+- Platform support still depends on upstream site behavior and extractor health.
+- Public media responses can change without notice.
 - Large files can still exceed Telegram upload limits.
 - SQLite is not intended for high-write multi-instance deployments.
 
 ---
 Note
 
-The old text-trigger music search was removed because it was too unstable in real-world VPS operation.
+The old text-based track search was removed because it was too unstable in real-world VPS operation.
 
-This project is now focused on direct media links, not song search by words.
----
+This project now focuses on direct media URLs instead of song search by words. YouTube-related search and extractor instability was one of the reasons for that change.

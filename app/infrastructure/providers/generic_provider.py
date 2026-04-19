@@ -57,6 +57,7 @@ class YtDlpUrlProvider:
             normalized_key=build_cache_key(self._platform, resource_type, artifact.source_id),
             original_url=url,
             canonical_url=artifact.canonical_url,
+            engine_name="yt-dlp",
             media_kind=artifact.media_kind,
             title=artifact.title,
             author=artifact.uploader,
@@ -87,6 +88,7 @@ class YtDlpUrlProvider:
             source_type=self._platform.value,
             canonical_url=normalized.canonical_url,
             media_kind=artifact.media_kind,
+            engine_name=normalized.engine_name,
         )
         if normalized.resource_type == "photo_post":
             log_event(
@@ -120,6 +122,7 @@ class YtDlpUrlProvider:
             source_type=self._platform.value,
             canonical_url=normalized.canonical_url,
             media_kind="video",
+            engine_name="yt-dlp",
         )
         try:
             path, _ = await self._downloader.download_video(normalized, work_dir)
@@ -132,6 +135,7 @@ class YtDlpUrlProvider:
                 source_type=self._platform.value,
                 canonical_url=normalized.canonical_url,
                 media_kind="video",
+                engine_name="yt-dlp",
                 error_code=exc.error_code,
             )
             raise
@@ -143,6 +147,7 @@ class YtDlpUrlProvider:
             source_type=self._platform.value,
             canonical_url=normalized.canonical_url,
             media_kind="video",
+            engine_name="yt-dlp",
             file_path=str(path),
         )
         return path
@@ -158,6 +163,7 @@ class YtDlpUrlProvider:
             source_type=self._platform.value,
             canonical_url=normalized.audio_url,
             media_kind="audio",
+            engine_name="yt-dlp",
         )
         try:
             path, _ = await self._downloader.download_audio(
@@ -174,6 +180,7 @@ class YtDlpUrlProvider:
                 source_type=self._platform.value,
                 canonical_url=normalized.audio_url,
                 media_kind="audio",
+                engine_name="yt-dlp",
                 error_code=exc.error_code,
             )
             raise
@@ -185,6 +192,7 @@ class YtDlpUrlProvider:
             source_type=self._platform.value,
             canonical_url=normalized.audio_url,
             media_kind="audio",
+            engine_name="yt-dlp",
             file_path=str(path),
         )
         return path

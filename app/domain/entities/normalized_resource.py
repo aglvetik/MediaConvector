@@ -14,6 +14,7 @@ class NormalizedResource:
     normalized_key: str
     original_url: str
     canonical_url: str
+    engine_name: str = "yt-dlp"
     media_kind: str = "video"
     title: str | None = None
     author: str | None = None

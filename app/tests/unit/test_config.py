@@ -18,6 +18,7 @@ def test_settings_load_with_minimal_required_env(monkeypatch) -> None:
     assert settings.user_request_cooldown_seconds == 3
     assert settings.ffmpeg_path == "ffmpeg"
     assert settings.ytdlp_path == "yt-dlp"
+    assert settings.gallerydl_path == "gallery-dl"
     assert settings.resolved_ytdlp_cookies_file is None
 
 

@@ -46,12 +46,14 @@ async def test_health_service_collect_handles_backend_failures(tmp_path: Path) -
         telegram_gateway=ReadyGateway(),
         ffmpeg_path="ffmpeg",
         ytdlp_path="yt-dlp",
+        gallerydl_path="gallery-dl",
         job_stale_after_minutes=15,
     )
 
     report = await service.collect()
 
     assert report.database_ok is False
+    assert isinstance(report.gallerydl_ok, bool)
     assert report.stuck_jobs == 0
     assert report.cache_status_counts == {}
     assert report.total_requests == 0

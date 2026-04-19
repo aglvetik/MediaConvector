@@ -29,6 +29,7 @@ async def run() -> None:
         temp_dir_ok=health_report.temp_dir_ok,
         ffmpeg_ok=health_report.ffmpeg_ok,
         ytdlp_ok=health_report.ytdlp_ok,
+        gallerydl_ok=health_report.gallerydl_ok,
         bot_ready=health_report.bot_ready,
     )
 

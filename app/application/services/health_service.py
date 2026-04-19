@@ -21,6 +21,7 @@ class HealthReport:
     temp_dir_ok: bool
     ffmpeg_ok: bool
     ytdlp_ok: bool
+    gallerydl_ok: bool
     bot_ready: bool
     stuck_jobs: int
     temp_dir_size_bytes: int
@@ -40,6 +41,7 @@ class HealthService:
         telegram_gateway: TelegramGateway,
         ffmpeg_path: str,
         ytdlp_path: str,
+        gallerydl_path: str,
         job_stale_after_minutes: int,
     ) -> None:
         self._database = database
@@ -50,6 +52,7 @@ class HealthService:
         self._telegram_gateway = telegram_gateway
         self._ffmpeg_path = ffmpeg_path
         self._ytdlp_path = ytdlp_path
+        self._gallerydl_path = gallerydl_path
         self._job_stale_after_minutes = job_stale_after_minutes
 
     async def collect(self) -> HealthReport:
@@ -62,6 +65,7 @@ class HealthService:
         temp_dir_ok = self._temp_file_manager.root.exists() and self._temp_file_manager.root.is_dir()
         ffmpeg_ok = self._binary_available(self._ffmpeg_path)
         ytdlp_ok = self._binary_available(self._ytdlp_path)
+        gallerydl_ok = self._binary_available(self._gallerydl_path)
         stuck_jobs = await self._safe_call(lambda: self._job_repository.count_stuck_jobs(self._job_stale_after_minutes), 0)
         temp_dir_size_bytes = await self._temp_file_manager.directory_size_bytes()
         cache_stats = await self._safe_call(self._cache_repository.count_by_status, {})
@@ -71,6 +75,7 @@ class HealthService:
             temp_dir_ok=temp_dir_ok,
             ffmpeg_ok=ffmpeg_ok,
             ytdlp_ok=ytdlp_ok,
+            gallerydl_ok=gallerydl_ok,
             bot_ready=self._telegram_gateway.is_ready,
             stuck_jobs=stuck_jobs,
             temp_dir_size_bytes=temp_dir_size_bytes,
@@ -80,10 +85,11 @@ class HealthService:
 
     async def ping_text(self) -> str:
         report = await self.collect()
-        overall = all((report.database_ok, report.temp_dir_ok, report.ffmpeg_ok, report.ytdlp_ok, report.bot_ready))
+        overall = all((report.database_ok, report.temp_dir_ok, report.ffmpeg_ok, report.ytdlp_ok, report.gallerydl_ok, report.bot_ready))
         return (
             f"pong | ok={str(overall).lower()} | db={report.database_ok} | temp={report.temp_dir_ok} "
-            f"| ffmpeg={report.ffmpeg_ok} | yt-dlp={report.ytdlp_ok} | bot={report.bot_ready} | stuck_jobs={report.stuck_jobs}"
+            f"| ffmpeg={report.ffmpeg_ok} | yt-dlp={report.ytdlp_ok} | gallery-dl={report.gallerydl_ok} "
+            f"| bot={report.bot_ready} | stuck_jobs={report.stuck_jobs}"
         )
 
     @staticmethod
