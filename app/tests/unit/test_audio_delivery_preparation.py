@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,20 @@ def _build_music_request(*, source_video_url: str | None = None, source_video_id
             source_video_id=source_video_id,
             source_resolution_strategy="original_source_video" if source_video_url is not None else None,
             duration_sec=15,
+        ),
+    )
+
+
+def _build_earliest_music_request() -> MediaRequest:
+    request = _build_music_request(
+        source_video_url="https://www.tiktok.com/@creator/video/9876543210123456792",
+        source_video_id="9876543210123456792",
+    )
+    return replace(
+        request,
+        normalized_resource=replace(
+            request.normalized_resource,
+            source_resolution_strategy="earliest_sound_video",
         ),
     )
 
@@ -187,6 +202,24 @@ async def test_music_only_runtime_path_prefers_source_video_and_logs_it(service_
 
 
 @pytest.mark.asyncio
+async def test_music_only_runtime_path_logs_earliest_video_branch(service_harness, monkeypatch) -> None:
+    request = _build_earliest_music_request()
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def fake_log_event(logger, level, event_name, **fields) -> None:
+        del logger, level
+        events.append((event_name, fields))
+
+    monkeypatch.setattr("app.application.services.media_pipeline_service.log_event", fake_log_event)
+
+    result = await service_harness.media_pipeline_service.process(request, service_harness.provider)
+
+    assert result.audio_receipt is not None
+    event_names = [event_name for event_name, _ in events]
+    assert "tiktok_music_pipeline_using_earliest_video" in event_names
+
+
+@pytest.mark.asyncio
 async def test_music_only_with_source_video_never_calls_download_audio(service_harness) -> None:
     request = _build_music_request(
         source_video_url="https://www.tiktok.com/@creator/video/9876543210123456791",
@@ -230,6 +263,7 @@ async def test_music_only_transcode_failure_does_not_emit_prepared_metadata_and_
     assert str(unavailable["audio_filename"]).endswith(".mp3")
     assert unavailable["source_audio_extension"] == "m4a"
     assert unavailable["final_audio_extension"] == "mp3"
+    assert unavailable["error_message"] == "transcode failed"
 
 
 @pytest.mark.asyncio

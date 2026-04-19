@@ -60,6 +60,8 @@ class PreparedAudioResult:
     asset: PreparedAudioAsset | None = None
     notice: str | None = None
     error_code: str | None = None
+    error_message: str | None = None
+    error_context: dict[str, object] | None = None
     telegram_filename: str | None = None
     source_audio_extension: str | None = None
     final_audio_extension: str | None = None
@@ -355,15 +357,21 @@ class MediaPipelineService:
                 should_use_source_video_for_music_only=should_use_source_video,
             )
         if should_use_source_video:
+            pipeline_event_name = (
+                "tiktok_music_pipeline_using_earliest_video"
+                if request.normalized_resource.source_resolution_strategy == "earliest_sound_video"
+                else "tiktok_music_pipeline_using_source_video"
+            )
             log_event(
                 self._logger,
                 20,
-                "tiktok_music_pipeline_using_source_video",
+                pipeline_event_name,
                 request_id=request.request_id,
                 chat_id=request.chat_id,
                 normalized_key=request.normalized_resource.normalized_key,
                 source_video_url=request.normalized_resource.source_video_url,
                 source_video_id=request.normalized_resource.source_video_id,
+                source_resolution_strategy=request.normalized_resource.source_resolution_strategy,
             )
             source_audio_path = await provider.download_video(request.normalized_resource, work_dir)
             audio_result = await self._prepare_audio_from_video(
@@ -382,6 +390,7 @@ class MediaPipelineService:
                 source_video_url=request.normalized_resource.source_video_url,
                 success=audio_result.is_prepared,
                 error_code=audio_result.error_code,
+                source_resolution_strategy=request.normalized_resource.source_resolution_strategy,
             )
         else:
             source_audio_path = await provider.download_audio(request.normalized_resource, work_dir)
@@ -414,6 +423,8 @@ class MediaPipelineService:
                 source_audio_extension=audio_result.source_audio_extension,
                 final_audio_extension=audio_result.final_audio_extension,
                 error_code=audio_result.error_code or "prepared_audio_missing",
+                error_message=audio_result.error_message,
+                error_context=audio_result.error_context,
             )
         media_result = await self._delivery_service.deliver_audio_only(
             request,
@@ -929,6 +940,8 @@ class MediaPipelineService:
                     status="failed_fatal" if fatal_on_failure else "failed_non_fatal",
                     notice=messages.TEMPORARY_DOWNLOAD_ERROR if fatal_on_failure else failure_notice,
                     error_code="prepared_audio_invalid",
+                    error_message=mismatch_reason,
+                    error_context={"mismatch_reason": mismatch_reason},
                     telegram_filename=asset.telegram_filename,
                     source_audio_extension=asset.source_audio_extension,
                     final_audio_extension=asset.container_extension,
@@ -951,6 +964,7 @@ class MediaPipelineService:
             return PreparedAudioResult(
                 status="prepared",
                 asset=asset,
+                error_message=None,
                 telegram_filename=asset.telegram_filename,
                 source_audio_extension=asset.source_audio_extension,
                 final_audio_extension=asset.container_extension,
@@ -967,6 +981,8 @@ class MediaPipelineService:
                 status=result_status,
                 notice=notice,
                 error_code=exc.error_code,
+                error_message=str(exc),
+                error_context=dict(exc.context),
                 telegram_filename=intended_filename,
                 source_audio_extension=source_extension,
                 final_audio_extension=final_extension,
@@ -991,6 +1007,8 @@ class MediaPipelineService:
                 status="failed_fatal" if fatal_on_failure else "failed_non_fatal",
                 notice=messages.TEMPORARY_DOWNLOAD_ERROR if fatal_on_failure else failure_notice,
                 error_code=getattr(exc, "error_code", "audio_prepare_failed"),
+                error_message=str(exc),
+                error_context=getattr(exc, "context", None),
                 telegram_filename=intended_filename,
                 source_audio_extension=source_extension,
                 final_audio_extension=final_extension,

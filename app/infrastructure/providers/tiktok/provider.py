@@ -73,6 +73,18 @@ class _TikTokMusicSourceCandidate:
     video_id: str
     strategy: str
     score: int
+    path: str
+    created_at: int | None = None
+    discovery_order: int = 0
+    music_match: bool = False
+    has_original_flag: bool = False
+
+
+@dataclass(slots=True)
+class _TikTokMusicResolutionResult:
+    original_candidate: _TikTokMusicSourceCandidate | None
+    earliest_candidate: _TikTokMusicSourceCandidate | None
+    diagnostics: dict[str, object]
 
 
 class TikTokProvider:
@@ -187,13 +199,37 @@ class TikTokProvider:
                     canonical_url=canonical_url,
                     music_id=resource_id,
                 )
-                source_video_url, source_video_id, source_resolution_strategy = self._resolve_music_source_video(
+                resolution_result = self._resolve_music_source_video(
                     canonical_url=canonical_url,
                     resource_id=resource_id,
                     web_state=web_state,
                     info=info,
                 )
-                if source_video_url is not None:
+                diagnostics = resolution_result.diagnostics
+                log_event(
+                    self._logger,
+                    20,
+                    "tiktok_music_source_resolution_diagnostics",
+                    canonical_url=canonical_url,
+                    music_id=resource_id,
+                    info_available=bool(info),
+                    web_state_available=bool(web_state),
+                    info_top_level_keys=diagnostics["info_top_level_keys"],
+                    info_relevant_keys=diagnostics["info_relevant_keys"],
+                    web_state_top_level_keys=diagnostics["web_state_top_level_keys"],
+                    web_state_relevant_keys=diagnostics["web_state_relevant_keys"],
+                    candidate_source_video_urls=diagnostics["candidate_source_video_urls"],
+                    candidate_source_video_ids=diagnostics["candidate_source_video_ids"],
+                    candidate_strategies=diagnostics["candidate_strategies"],
+                    candidate_created_at=diagnostics["candidate_created_at"],
+                    candidate_paths=diagnostics["candidate_paths"],
+                    rejected_candidate_reasons=diagnostics["rejected_candidate_reasons"],
+                    rejected_candidate_paths=diagnostics["rejected_candidate_paths"],
+                )
+                if resolution_result.original_candidate is not None:
+                    source_video_url = resolution_result.original_candidate.video_url
+                    source_video_id = resolution_result.original_candidate.video_id
+                    source_resolution_strategy = resolution_result.original_candidate.strategy
                     log_event(
                         self._logger,
                         20,
@@ -211,8 +247,41 @@ class TikTokProvider:
                         "tiktok_music_source_video_resolution_failed",
                         canonical_url=canonical_url,
                         music_id=resource_id,
-                        reason="source_video_not_found",
+                        reason=diagnostics["source_failure_reason"],
+                        candidate_source_video_ids=diagnostics["candidate_source_video_ids"],
                     )
+                    log_event(
+                        self._logger,
+                        20,
+                        "tiktok_music_earliest_video_resolution_started",
+                        canonical_url=canonical_url,
+                        music_id=resource_id,
+                    )
+                    if resolution_result.earliest_candidate is not None:
+                        source_video_url = resolution_result.earliest_candidate.video_url
+                        source_video_id = resolution_result.earliest_candidate.video_id
+                        source_resolution_strategy = resolution_result.earliest_candidate.strategy
+                        log_event(
+                            self._logger,
+                            20,
+                            "tiktok_music_earliest_video_resolved",
+                            canonical_url=canonical_url,
+                            music_id=resource_id,
+                            source_video_url=source_video_url,
+                            source_video_id=source_video_id,
+                            resolution_strategy=source_resolution_strategy,
+                            created_at=resolution_result.earliest_candidate.created_at,
+                        )
+                    else:
+                        log_event(
+                            self._logger,
+                            30,
+                            "tiktok_music_earliest_video_resolution_failed",
+                            canonical_url=canonical_url,
+                            music_id=resource_id,
+                            reason=diagnostics["earliest_failure_reason"],
+                            candidate_source_video_ids=diagnostics["candidate_source_video_ids"],
+                        )
             if resource_type == TikTokResourceType.PHOTO_POST:
                 gallery_artifact = await self._build_gallery_artifact(
                     canonical_url=canonical_url,
@@ -843,21 +912,67 @@ class TikTokProvider:
         resource_id: str,
         web_state: dict[str, object],
         info: dict[str, object],
-    ) -> tuple[str | None, str | None, str | None]:
-        candidates = self._collect_music_source_candidates(web_state, music_id=resource_id, path="web_state")
+    ) -> _TikTokMusicResolutionResult:
+        diagnostics = self._build_music_resolution_diagnostics(info, web_state)
+        candidates: list[_TikTokMusicSourceCandidate] = []
+        if web_state:
+            candidates.extend(
+                self._collect_music_source_candidates(
+                    web_state,
+                    music_id=resource_id,
+                    path="web_state",
+                    diagnostics=diagnostics,
+                )
+            )
         if info:
-            candidates.extend(self._collect_music_source_candidates(info, music_id=resource_id, path="probe"))
-        if not candidates:
-            return None, None, None
+            candidates.extend(
+                self._collect_music_source_candidates(
+                    info,
+                    music_id=resource_id,
+                    path="probe",
+                    diagnostics=diagnostics,
+                )
+            )
 
-        best_by_key: dict[str, _TikTokMusicSourceCandidate] = {}
-        for candidate in candidates:
-            key = candidate.video_id or candidate.video_url
-            current = best_by_key.get(key)
-            if current is None or candidate.score > current.score:
-                best_by_key[key] = candidate
-        best = max(best_by_key.values(), key=lambda item: (item.score, -len(item.video_url)))
-        return best.video_url, best.video_id, best.strategy
+        deduped_candidates = self._dedupe_music_source_candidates(candidates)
+        diagnostics["candidate_source_video_urls"] = [candidate.video_url for candidate in deduped_candidates[:20]]
+        diagnostics["candidate_source_video_ids"] = [candidate.video_id for candidate in deduped_candidates[:20]]
+        diagnostics["candidate_strategies"] = [candidate.strategy for candidate in deduped_candidates[:20]]
+        diagnostics["candidate_created_at"] = [candidate.created_at for candidate in deduped_candidates[:20]]
+        diagnostics["candidate_paths"] = [candidate.path for candidate in deduped_candidates[:20]]
+
+        original_candidates = [
+            candidate
+            for candidate in deduped_candidates
+            if candidate.has_original_flag or candidate.strategy in {"original_source_video", "source_flag_video"}
+        ]
+        original_candidate = (
+            max(original_candidates, key=lambda item: (item.score, -(item.created_at or 0), -item.discovery_order))
+            if original_candidates
+            else None
+        )
+        earliest_candidate = self._select_earliest_music_candidate(deduped_candidates)
+
+        diagnostics["source_failure_reason"] = (
+            "no_candidates_discovered"
+            if not deduped_candidates
+            else "no_original_or_source_candidate"
+        )
+        diagnostics["earliest_failure_reason"] = (
+            "no_candidates_discovered"
+            if not deduped_candidates
+            else "no_earliest_candidate_available"
+        )
+        diagnostics["final_failure_reason"] = (
+            "no_source_or_earliest_video_found"
+            if deduped_candidates
+            else "no_video_candidates_found_in_music_page_data"
+        )
+        return _TikTokMusicResolutionResult(
+            original_candidate=original_candidate,
+            earliest_candidate=earliest_candidate if original_candidate is None else None,
+            diagnostics=diagnostics,
+        )
 
     def _collect_music_source_candidates(
         self,
@@ -865,18 +980,26 @@ class TikTokProvider:
         *,
         music_id: str,
         path: str,
+        diagnostics: dict[str, object],
     ) -> list[_TikTokMusicSourceCandidate]:
         candidates: list[_TikTokMusicSourceCandidate] = []
         if isinstance(payload, dict):
-            candidate = self._build_music_source_candidate(payload, music_id=music_id, path=path)
+            candidate = self._build_music_source_candidate(payload, music_id=music_id, path=path, diagnostics=diagnostics)
             if candidate is not None:
                 candidates.append(candidate)
+            elif self._payload_looks_relevant_for_music_resolution(payload, path):
+                self._record_music_resolution_rejection(
+                    diagnostics,
+                    path=path,
+                    reason="relevant_payload_without_video_candidate",
+                    payload=payload,
+                )
             for key, value in payload.items():
-                candidates.extend(self._collect_music_source_candidates(value, music_id=music_id, path=f"{path}.{key}"))
+                candidates.extend(self._collect_music_source_candidates(value, music_id=music_id, path=f"{path}.{key}", diagnostics=diagnostics))
             return candidates
         if isinstance(payload, list):
             for index, item in enumerate(payload):
-                candidates.extend(self._collect_music_source_candidates(item, music_id=music_id, path=f"{path}[{index}]"))
+                candidates.extend(self._collect_music_source_candidates(item, music_id=music_id, path=f"{path}[{index}]", diagnostics=diagnostics))
             return candidates
         if isinstance(payload, str):
             direct_url = self._normalize_candidate_video_url(payload)
@@ -895,7 +1018,16 @@ class TikTokProvider:
                                 has_author_handle=False,
                                 has_original_flag=False,
                             ),
+                            path=path,
+                            discovery_order=self._next_music_candidate_order(diagnostics),
                         )
+                    )
+                else:
+                    self._record_music_resolution_rejection(
+                        diagnostics,
+                        path=path,
+                        reason="direct_video_url_without_video_id",
+                        payload={"url": direct_url},
                     )
             return candidates
         return candidates
@@ -906,13 +1038,14 @@ class TikTokProvider:
         *,
         music_id: str,
         path: str,
+        diagnostics: dict[str, object],
     ) -> _TikTokMusicSourceCandidate | None:
         direct_url = self._pick_first_tiktok_video_url(payload)
         video_id = extract_video_id(direct_url) if direct_url else None
         music_match = self._mapping_matches_music_id(payload, music_id)
         has_original_flag = self._mapping_has_original_source_flag(payload)
         if video_id is None:
-            for key in ("itemId", "item_id", "videoId", "video_id", "aweme_id"):
+            for key in ("itemId", "item_id", "videoId", "video_id", "aweme_id", "awemeId", "group_id", "groupId"):
                 raw_value = payload.get(key)
                 if raw_value is None:
                     continue
@@ -926,10 +1059,17 @@ class TikTokProvider:
             if candidate.isdigit():
                 video_id = candidate
         if not video_id:
+            self._record_music_resolution_rejection(
+                diagnostics,
+                path=path,
+                reason="video_id_missing",
+                payload=payload,
+            )
             return None
 
         author_handle = self._extract_author_handle(payload)
         video_url = direct_url or self._build_tiktok_video_url(video_id, author_handle)
+        created_at = self._extract_candidate_timestamp(payload)
         score = self._score_music_source_candidate(
             path=path,
             music_match=music_match,
@@ -937,20 +1077,27 @@ class TikTokProvider:
             has_author_handle=author_handle is not None,
             has_original_flag=has_original_flag,
         )
-        if music_match and (has_original_flag or self._path_suggests_original_source(path)):
+        if has_original_flag or self._path_suggests_original_source(path):
             strategy = "original_source_video"
+        elif music_match and created_at is not None:
+            strategy = "earliest_sound_video_candidate"
         elif music_match:
             strategy = "music_matched_video"
-        elif has_original_flag or self._path_suggests_original_source(path):
-            strategy = "source_flag_video"
         else:
             strategy = "fallback_video_candidate"
-        return _TikTokMusicSourceCandidate(
+        candidate = _TikTokMusicSourceCandidate(
             video_url=video_url,
             video_id=video_id,
             strategy=strategy,
             score=score,
+            path=path,
+            created_at=created_at,
+            discovery_order=self._next_music_candidate_order(diagnostics),
+            music_match=music_match,
+            has_original_flag=has_original_flag,
         )
+        self._record_music_resolution_candidate(diagnostics, candidate)
+        return candidate
 
     def _pick_first_tiktok_video_url(self, payload: object) -> str | None:
         if isinstance(payload, str):
@@ -1021,10 +1168,10 @@ class TikTokProvider:
         return cleaned
 
     def _mapping_matches_music_id(self, payload: dict[str, object], music_id: str) -> bool:
-        for candidate in self._find_values(payload, {"musicId", "music_id", "musicID", "musicid"}):
+        for candidate in self._find_values(payload, {"musicId", "music_id", "musicID", "musicid", "musicIdStr"}):
             if str(candidate).strip() == music_id:
                 return True
-        for key in ("music", "musicInfo", "music_info", "musicData", "music_data"):
+        for key in ("music", "musicInfo", "music_info", "musicData", "music_data", "musicDetail", "music_detail"):
             value = payload.get(key)
             if not isinstance(value, dict):
                 continue
@@ -1080,6 +1227,139 @@ class TikTokProvider:
         if author_handle:
             return f"https://www.tiktok.com/@{author_handle}/video/{video_id}"
         return f"https://www.tiktok.com/embed/v2/{video_id}"
+
+    def _select_earliest_music_candidate(
+        self,
+        candidates: list[_TikTokMusicSourceCandidate],
+    ) -> _TikTokMusicSourceCandidate | None:
+        earliest_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.music_match
+            or candidate.strategy in {"earliest_sound_video_candidate", "music_matched_video"}
+            or "music" in candidate.path.lower()
+        ]
+        if not earliest_candidates:
+            return None
+        selected = min(
+            earliest_candidates,
+            key=lambda item: (
+                item.created_at is None,
+                item.created_at if item.created_at is not None else item.discovery_order,
+                item.discovery_order,
+            ),
+        )
+        if selected.strategy != "earliest_sound_video":
+            return _TikTokMusicSourceCandidate(
+                video_url=selected.video_url,
+                video_id=selected.video_id,
+                strategy="earliest_sound_video",
+                score=selected.score,
+                path=selected.path,
+                created_at=selected.created_at,
+                discovery_order=selected.discovery_order,
+                music_match=selected.music_match,
+                has_original_flag=selected.has_original_flag,
+            )
+        return selected
+
+    @staticmethod
+    def _dedupe_music_source_candidates(
+        candidates: list[_TikTokMusicSourceCandidate],
+    ) -> list[_TikTokMusicSourceCandidate]:
+        best_by_key: dict[str, _TikTokMusicSourceCandidate] = {}
+        for candidate in candidates:
+            key = candidate.video_id or candidate.video_url
+            current = best_by_key.get(key)
+            if current is None or candidate.score > current.score:
+                best_by_key[key] = candidate
+        return list(best_by_key.values())
+
+    @staticmethod
+    def _extract_candidate_timestamp(payload: dict[str, object]) -> int | None:
+        for key in ("createTime", "create_time", "publishTime", "publish_time", "timestamp", "item_create_time"):
+            raw_value = payload.get(key)
+            try:
+                if raw_value is not None:
+                    return int(str(raw_value).strip())
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _build_music_resolution_diagnostics(
+        self,
+        info: dict[str, object],
+        web_state: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "info_top_level_keys": tuple(sorted(info.keys())[:30]) if isinstance(info, dict) else (),
+            "info_relevant_keys": tuple(self._relevant_music_resolution_keys(info)),
+            "web_state_top_level_keys": tuple(sorted(web_state.keys())[:30]) if isinstance(web_state, dict) else (),
+            "web_state_relevant_keys": tuple(self._relevant_music_resolution_keys(web_state)),
+            "candidate_source_video_urls": [],
+            "candidate_source_video_ids": [],
+            "candidate_strategies": [],
+            "candidate_created_at": [],
+            "candidate_paths": [],
+            "rejected_candidate_reasons": [],
+            "rejected_candidate_paths": [],
+            "candidate_order": 0,
+        }
+
+    def _record_music_resolution_candidate(
+        self,
+        diagnostics: dict[str, object],
+        candidate: _TikTokMusicSourceCandidate,
+    ) -> None:
+        self._append_music_diagnostic(diagnostics, "candidate_source_video_urls", candidate.video_url)
+        self._append_music_diagnostic(diagnostics, "candidate_source_video_ids", candidate.video_id)
+        self._append_music_diagnostic(diagnostics, "candidate_strategies", candidate.strategy)
+        self._append_music_diagnostic(diagnostics, "candidate_created_at", candidate.created_at)
+        self._append_music_diagnostic(diagnostics, "candidate_paths", candidate.path)
+
+    def _record_music_resolution_rejection(
+        self,
+        diagnostics: dict[str, object],
+        *,
+        path: str,
+        reason: str,
+        payload: object,
+    ) -> None:
+        self._append_music_diagnostic(diagnostics, "rejected_candidate_reasons", reason)
+        self._append_music_diagnostic(diagnostics, "rejected_candidate_paths", f"{path}:{self._summarize_payload_keys(payload)}")
+
+    @staticmethod
+    def _append_music_diagnostic(diagnostics: dict[str, object], key: str, value: object) -> None:
+        bucket = diagnostics.setdefault(key, [])
+        if isinstance(bucket, list) and len(bucket) < 20:
+            bucket.append(value)
+
+    @staticmethod
+    def _next_music_candidate_order(diagnostics: dict[str, object]) -> int:
+        current = int(diagnostics.get("candidate_order", 0))
+        diagnostics["candidate_order"] = current + 1
+        return current
+
+    def _relevant_music_resolution_keys(self, payload: object) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        relevant = [
+            key
+            for key in payload.keys()
+            if any(token in key.lower() for token in ("music", "item", "video", "aweme", "original", "origin", "source", "detail", "list", "feed", "anchor"))
+        ]
+        return sorted(relevant)[:20]
+
+    def _payload_looks_relevant_for_music_resolution(self, payload: dict[str, object], path: str) -> bool:
+        if self._path_suggests_original_source(path) or self._path_suggests_related_candidate(path):
+            return True
+        return bool(self._relevant_music_resolution_keys(payload))
+
+    @staticmethod
+    def _summarize_payload_keys(payload: object) -> str:
+        if not isinstance(payload, dict):
+            return type(payload).__name__
+        return ",".join(sorted(str(key) for key in payload.keys())[:6])
 
     @staticmethod
     def _resolve_resource_id(canonical_url: str, info: dict[str, object], resource_type: TikTokResourceType) -> str:
