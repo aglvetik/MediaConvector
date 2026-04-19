@@ -181,8 +181,26 @@ async def test_music_only_runtime_path_prefers_source_video_and_logs_it(service_
     assert service_harness.provider.download_calls["tiktok:music_only:123456"] == 1
     assert service_harness.provider.audio_download_calls["tiktok:music_only:123456"] == 0
     event_names = [event_name for event_name, _ in events]
+    assert "tiktok_music_branch_decision" in event_names
     assert "tiktok_music_pipeline_using_source_video" in event_names
     assert "tiktok_music_audio_extracted_from_source_video" in event_names
+
+
+@pytest.mark.asyncio
+async def test_music_only_with_source_video_never_calls_download_audio(service_harness) -> None:
+    request = _build_music_request(
+        source_video_url="https://www.tiktok.com/@creator/video/9876543210123456791",
+        source_video_id="9876543210123456791",
+    )
+
+    async def fail_download_audio(*args, **kwargs):
+        raise AssertionError("download_audio must not be called when source_video_url is present")
+
+    service_harness.provider.download_audio = fail_download_audio  # type: ignore[method-assign]
+
+    result = await service_harness.media_pipeline_service.process(request, service_harness.provider)
+
+    assert result.audio_receipt is not None
 
 
 @pytest.mark.asyncio
