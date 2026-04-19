@@ -24,7 +24,6 @@ This project now uses two download engines on purpose:
 In practice:
 
 - TikTok video posts -> `yt-dlp`
-- TikTok music URLs -> `yt-dlp`
 - TikTok photo/slideshow posts -> `gallery-dl`
 - YouTube video URLs -> `yt-dlp`
 - Instagram reels/videos -> `yt-dlp`
@@ -55,7 +54,7 @@ In practice:
 
 TikTok specifics:
 
-- TikTok `/music/...` links are handled as direct audio-only URLs through `yt-dlp`
+- TikTok `/music/...` links are not supported right now; send a video link with that sound instead
 - TikTok `/photo/...` slideshow posts are handled as visual-first downloads through `gallery-dl`
 - separate audio for TikTok video/photo content is best-effort optional, not guaranteed
 

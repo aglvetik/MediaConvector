@@ -163,7 +163,7 @@ class MediaPipelineService:
         try:
             if request.normalized_resource.resource_type == "photo_post":
                 owner_result = await self._run_photo_post_pipeline(request, provider, work_dir)
-            elif request.normalized_resource.resource_type == "music_only":
+            elif request.normalized_resource.media_kind == "audio":
                 owner_result = await self._run_audio_only_pipeline(request, provider, work_dir)
             else:
                 owner_result = await self._run_video_pipeline(request, provider, work_dir)
@@ -320,20 +320,6 @@ class MediaPipelineService:
         work_dir: Path,
     ) -> OwnerPipelineResult:
         metadata = await provider.fetch_metadata(request.normalized_resource)
-        is_tiktok_music_only = (
-            request.normalized_resource.platform.value == "tiktok"
-            and request.normalized_resource.resource_type == "music_only"
-        )
-        if is_tiktok_music_only:
-            log_event(
-                self._logger,
-                20,
-                "tiktok_music_audio_only_delivery_started",
-                request_id=request.request_id,
-                chat_id=request.chat_id,
-                normalized_key=request.normalized_resource.normalized_key,
-                source_video_url=request.normalized_resource.source_video_url,
-            )
         log_event(
             self._logger,
             20,
@@ -342,74 +328,23 @@ class MediaPipelineService:
             chat_id=request.chat_id,
             normalized_key=request.normalized_resource.normalized_key,
         )
-        should_use_source_video = self._should_use_source_video_for_music_only(request)
-        if request.normalized_resource.resource_type == "music_only":
-            log_event(
-                self._logger,
-                20,
-                "tiktok_music_branch_decision",
-                request_id=request.request_id,
-                chat_id=request.chat_id,
-                normalized_key=request.normalized_resource.normalized_key,
-                resource_type=request.normalized_resource.resource_type,
-                source_video_url=request.normalized_resource.source_video_url,
-                source_video_id=request.normalized_resource.source_video_id,
-                should_use_source_video_for_music_only=should_use_source_video,
-            )
-        if should_use_source_video:
-            pipeline_event_name = (
-                "tiktok_music_pipeline_using_earliest_video"
-                if request.normalized_resource.source_resolution_strategy == "earliest_sound_video"
-                else "tiktok_music_pipeline_using_source_video"
-            )
-            log_event(
-                self._logger,
-                20,
-                pipeline_event_name,
-                request_id=request.request_id,
-                chat_id=request.chat_id,
-                normalized_key=request.normalized_resource.normalized_key,
-                source_video_url=request.normalized_resource.source_video_url,
-                source_video_id=request.normalized_resource.source_video_id,
-                source_resolution_strategy=request.normalized_resource.source_resolution_strategy,
-            )
-            source_audio_path = await provider.download_video(request.normalized_resource, work_dir)
-            audio_result = await self._prepare_audio_from_video(
-                request,
-                source_audio_path,
-                metadata,
-                work_dir,
-            )
-            log_event(
-                self._logger,
-                20 if audio_result.is_prepared else 30,
-                "tiktok_music_audio_extracted_from_source_video",
-                request_id=request.request_id,
-                chat_id=request.chat_id,
-                normalized_key=request.normalized_resource.normalized_key,
-                source_video_url=request.normalized_resource.source_video_url,
-                success=audio_result.is_prepared,
-                error_code=audio_result.error_code,
-                source_resolution_strategy=request.normalized_resource.source_resolution_strategy,
+        source_audio_path = await provider.download_audio(request.normalized_resource, work_dir)
+        if source_audio_path is None:
+            audio_result = PreparedAudioResult(
+                status="failed_fatal",
+                notice=messages.TEMPORARY_DOWNLOAD_ERROR,
+                error_code="audio_not_available",
             )
         else:
-            source_audio_path = await provider.download_audio(request.normalized_resource, work_dir)
-            if source_audio_path is None:
-                audio_result = PreparedAudioResult(
-                    status="failed_fatal",
-                    notice=messages.TEMPORARY_DOWNLOAD_ERROR,
-                    error_code="audio_not_available",
-                )
-            else:
-                audio_result = await self._prepare_audio_delivery_asset(
-                    request=request,
-                    metadata=metadata,
-                    source_path=source_audio_path,
-                    work_dir=work_dir,
-                    fatal_on_failure=True,
-                    missing_notice=messages.TEMPORARY_DOWNLOAD_ERROR,
-                    failure_notice=messages.TEMPORARY_DOWNLOAD_ERROR,
-                )
+            audio_result = await self._prepare_audio_delivery_asset(
+                request=request,
+                metadata=metadata,
+                source_path=source_audio_path,
+                work_dir=work_dir,
+                fatal_on_failure=True,
+                missing_notice=messages.TEMPORARY_DOWNLOAD_ERROR,
+                failure_notice=messages.TEMPORARY_DOWNLOAD_ERROR,
+            )
         if source_audio_path is not None and not audio_result.is_prepared:
             log_event(
                 self._logger,
@@ -459,16 +394,6 @@ class MediaPipelineService:
             normalized_key=request.normalized_resource.normalized_key,
             success=media_result.audio_receipt is not None,
         )
-        if is_tiktok_music_only:
-            log_event(
-                self._logger,
-                20,
-                "tiktok_music_audio_only_delivery_finished",
-                request_id=request.request_id,
-                chat_id=request.chat_id,
-                normalized_key=request.normalized_resource.normalized_key,
-                success=media_result.audio_receipt is not None,
-            )
         return OwnerPipelineResult(media_result=media_result, cache_entry=cache_entry)
 
     async def _refresh_missing_audio(
@@ -507,22 +432,7 @@ class MediaPipelineService:
         try:
             metadata = await provider.fetch_metadata(request.normalized_resource)
             audio_result = PreparedAudioResult(status="not_available")
-            should_use_source_video = self._should_use_source_video_for_music_only(request)
-            if request.normalized_resource.resource_type == "music_only":
-                log_event(
-                    self._logger,
-                    20,
-                    "tiktok_music_branch_decision",
-                    request_id=request.request_id,
-                    chat_id=request.chat_id,
-                    normalized_key=request.normalized_resource.normalized_key,
-                    resource_type=request.normalized_resource.resource_type,
-                    source_video_url=request.normalized_resource.source_video_url,
-                    source_video_id=request.normalized_resource.source_video_id,
-                    should_use_source_video_for_music_only=should_use_source_video,
-                    refresh_audio_only=True,
-                )
-            if request.normalized_resource.resource_type == "video" or should_use_source_video:
+            if request.normalized_resource.media_kind == "video":
                 video_path = await provider.download_video(request.normalized_resource, work_dir)
                 audio_result = await self._prepare_audio_from_video(request, video_path, metadata, work_dir)
             else:
@@ -582,16 +492,6 @@ class MediaPipelineService:
             )
         finally:
             await self._temp_file_manager.remove_dir(work_dir)
-
-    @staticmethod
-    def _should_use_source_video_for_music_only(request: MediaRequest) -> bool:
-        platform = request.normalized_resource.platform
-        platform_value = platform.value if hasattr(platform, "value") else str(platform)
-        return (
-            platform_value == "tiktok"
-            and request.normalized_resource.resource_type == "music_only"
-            and bool(request.normalized_resource.source_video_url)
-        )
 
     async def _prepare_audio_from_video(
         self,

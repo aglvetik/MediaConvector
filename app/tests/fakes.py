@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from app import messages
 from app.domain.entities.media_result import DeliveryReceipt, MediaMetadata
 from app.domain.entities.normalized_resource import NormalizedResource
 from app.domain.entities.visual_media_entry import VisualMediaEntry
@@ -16,12 +17,12 @@ from app.domain.errors import (
     MediaTooLargeError,
     NormalizationError,
     TelegramDeliveryError,
+    UnsupportedUrlError,
 )
 from app.domain.policies import build_cache_key
 from app.infrastructure.providers.source_detection import detect_source_type, extract_first_supported_url
 from app.infrastructure.providers.tiktok.url_utils import (
     extract_first_tiktok_url,
-    extract_music_id,
     extract_photo_id,
     extract_video_id,
 )
@@ -41,7 +42,6 @@ class FakeProvider:
         self.invalid_urls: set[str] = set()
         self.download_first_gallery_keys: set[str] = set()
         self.photo_extensions: dict[str, tuple[str, ...]] = {}
-        self.music_source_video_missing_keys: set[str] = set()
 
     def extract_first_url(self, text: str) -> str | None:
         return extract_first_tiktok_url(text)
@@ -66,22 +66,17 @@ class FakeProvider:
             image_urls = tuple(f"https://example.com/{resource_id}-{index}.jpg" for index in range(1, self.photo_counts[normalized_key] + 1))
             audio_url = f"https://example.com/{resource_id}.m4a"
         elif "/music/" in url:
-            resource_type = "music_only"
-            resource_id = extract_music_id(url)
-            if resource_id is None:
-                raise NormalizationError("missing music id")
-            audio_url = f"https://example.com/{resource_id}.m4a"
+            raise UnsupportedUrlError(
+                "TikTok music links are not supported.",
+                user_message=messages.TIKTOK_MUSIC_LINKS_NOT_SUPPORTED,
+                error_code="unsupported_resource",
+                context={"reason": "tiktok_music_links_not_supported", "url": url},
+            )
         elif resource_id is None:
             raise NormalizationError("missing video id")
 
         normalized_key = build_cache_key(Platform.TIKTOK, resource_type, resource_id)
         photo_extensions = self.photo_extensions.get(normalized_key, ())
-        source_video_id = f"{resource_id}01" if resource_type == "music_only" else None
-        source_video_url = (
-            None
-            if resource_type != "music_only" or normalized_key in self.music_source_video_missing_keys
-            else f"https://www.tiktok.com/@soundauthor/video/{source_video_id}"
-        )
         return NormalizedResource(
             platform=Platform.TIKTOK,
             resource_type=resource_type,
@@ -90,13 +85,10 @@ class FakeProvider:
             original_url=url,
             canonical_url=url.split("?", 1)[0],
             engine_name="gallery-dl" if normalized_key in self.download_first_gallery_keys else "yt-dlp",
-            media_kind="gallery" if resource_type == "photo_post" and len(image_urls) > 1 else ("photo" if resource_type == "photo_post" else ("audio" if resource_type == "music_only" else "video")),
+            media_kind="gallery" if resource_type == "photo_post" and len(image_urls) > 1 else ("photo" if resource_type == "photo_post" else "video"),
             title=resource_type,
             author="author",
             audio_url=audio_url,
-            source_video_url=source_video_url,
-            source_video_id=source_video_id if source_video_url is not None else None,
-            source_resolution_strategy=("original_source_video" if source_video_url is not None else None),
             image_urls=() if normalized_key in self.download_first_gallery_keys else image_urls,
             image_entries=() if normalized_key in self.download_first_gallery_keys else tuple(
                 VisualMediaEntry(source_url=image_url, order=index, mime_type_hint="image/jpeg")
@@ -127,12 +119,6 @@ class FakeProvider:
             raise DownloadError("audio download failed", temporary=True)
         if not self.has_audio[normalized.normalized_key]:
             return None
-        if normalized.resource_type == "music_only" and normalized.source_video_url is not None:
-            self.download_calls[normalized.normalized_key] += 1
-            source_video_id = normalized.source_video_id or normalized.resource_id
-            path = work_dir / f"{source_video_id}.mp4"
-            path.write_bytes(b"video-bytes")
-            return path
         self.audio_download_calls[normalized.normalized_key] += 1
         path = work_dir / f"{normalized.resource_id}.m4a"
         path.write_bytes(b"audio-bytes")

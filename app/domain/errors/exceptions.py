@@ -17,8 +17,20 @@ class AppError(Exception):
 
 
 class UnsupportedUrlError(AppError):
-    def __init__(self, message: str = "Unsupported or missing media URL.") -> None:
-        super().__init__(message=message, user_message=messages.INVALID_TIKTOK_LINK, error_code="unsupported_url")
+    def __init__(
+        self,
+        message: str = "Unsupported or missing media URL.",
+        *,
+        user_message: str | None = None,
+        error_code: str = "unsupported_url",
+        context: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            user_message=user_message or messages.INVALID_TIKTOK_LINK,
+            error_code=error_code,
+            context=context or {},
+        )
 
 
 class NormalizationError(AppError):

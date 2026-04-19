@@ -1,62 +1,46 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from app import messages
-from app.domain.entities.media_result import DeliveryReceipt, MediaMetadata, MediaResult
 from app.domain.entities.media_request import MediaRequest
+from app.domain.entities.media_result import DeliveryReceipt, MediaMetadata, MediaResult
 from app.domain.entities.normalized_resource import NormalizedResource
 from app.domain.enums.cache_status import CacheStatus
 from app.domain.enums.delivery_status import DeliveryStatus
 from app.domain.enums.platform import Platform
 
 
-def _build_music_request(*, source_video_url: str | None = None, source_video_id: str | None = None) -> MediaRequest:
+def _build_audio_only_request() -> MediaRequest:
     return MediaRequest(
         request_id="req-audio",
         chat_id=1,
         user_id=10,
         message_id=100,
         chat_type="private",
-        message_text="https://www.tiktok.com/music/original-sound-123456",
+        message_text="https://likee.video/@user/audio/audio-123456",
         normalized_resource=NormalizedResource(
-            platform=Platform.TIKTOK,
+            platform=Platform.LIKEE,
             resource_type="music_only",
-            resource_id="123456",
-            normalized_key="tiktok:music_only:123456",
-            original_url="https://www.tiktok.com/music/original-sound-123456",
-            canonical_url="https://www.tiktok.com/music/original-sound-123456",
+            resource_id="audio-123456",
+            normalized_key="likee:music_only:audio-123456",
+            original_url="https://likee.video/@user/audio/audio-123456",
+            canonical_url="https://likee.video/@user/audio/audio-123456",
             media_kind="audio",
             title="Original sound",
             author="Creator",
-            source_video_url=source_video_url,
-            source_video_id=source_video_id,
-            source_resolution_strategy="original_source_video" if source_video_url is not None else None,
+            audio_url="https://cdn.example/audio-123456.mp3",
             duration_sec=15,
-        ),
-    )
-
-
-def _build_earliest_music_request() -> MediaRequest:
-    request = _build_music_request(
-        source_video_url="https://www.tiktok.com/@creator/video/9876543210123456792",
-        source_video_id="9876543210123456792",
-    )
-    return replace(
-        request,
-        normalized_resource=replace(
-            request.normalized_resource,
-            source_resolution_strategy="earliest_sound_video",
+            has_expected_audio=True,
         ),
     )
 
 
 @pytest.mark.asyncio
-async def test_tiktok_music_fallback_m4a_is_prepared_as_real_mp3(service_harness, tmp_path: Path) -> None:
-    request = _build_music_request()
+async def test_audio_fallback_m4a_is_prepared_as_real_mp3(service_harness, tmp_path: Path) -> None:
+    request = _build_audio_only_request()
     source_path = tmp_path / "fallback-source.m4a"
     source_path.write_bytes(b"m4a-bytes")
 
@@ -79,12 +63,12 @@ async def test_tiktok_music_fallback_m4a_is_prepared_as_real_mp3(service_harness
     assert asset.source_audio_extension == "m4a"
     assert asset.container_extension == "mp3"
     assert asset.final_audio_path.exists()
-    assert service_harness.ffmpeg.calls["transcode:tiktok:music_only:123456"] == 1
+    assert service_harness.ffmpeg.calls["transcode:likee:music_only:audio-123456"] == 1
 
 
 @pytest.mark.asyncio
-async def test_music_only_preparation_result_contains_non_null_final_audio_path(service_harness, tmp_path: Path) -> None:
-    request = _build_music_request()
+async def test_audio_only_preparation_result_contains_non_null_final_audio_path(service_harness, tmp_path: Path) -> None:
+    request = _build_audio_only_request()
     source_path = tmp_path / "fallback-source.m4a"
     source_path.write_bytes(b"m4a-bytes")
 
@@ -113,8 +97,8 @@ async def test_music_only_preparation_result_contains_non_null_final_audio_path(
 
 
 @pytest.mark.asyncio
-async def test_tiktok_music_fallback_can_keep_consistent_m4a_when_conversion_disabled(service_harness, tmp_path: Path) -> None:
-    request = _build_music_request()
+async def test_audio_fallback_can_keep_consistent_m4a_when_conversion_disabled(service_harness, tmp_path: Path) -> None:
+    request = _build_audio_only_request()
     source_path = tmp_path / "fallback-source.m4a"
     source_path.write_bytes(b"m4a-bytes")
 
@@ -137,15 +121,13 @@ async def test_tiktok_music_fallback_can_keep_consistent_m4a_when_conversion_dis
     assert asset.telegram_filename.endswith(".m4a")
     assert asset.source_audio_extension == "m4a"
     assert asset.container_extension == "m4a"
-    assert service_harness.ffmpeg.calls.get("transcode:tiktok:music_only:123456", 0) == 0
+    assert service_harness.ffmpeg.calls.get("transcode:likee:music_only:audio-123456", 0) == 0
 
 
 @pytest.mark.asyncio
-async def test_music_only_pipeline_routes_final_prepared_audio_to_audio_delivery(service_harness) -> None:
-    request = _build_music_request(
-        source_video_url="https://www.tiktok.com/@creator/video/9876543210123456789",
-        source_video_id="9876543210123456789",
-    )
+async def test_audio_only_pipeline_routes_final_prepared_audio_to_audio_delivery(service_harness) -> None:
+    request = _build_audio_only_request()
+    provider = service_harness.generic_providers[Platform.LIKEE]
     captured: dict[str, object] = {}
 
     async def fake_deliver_audio_only(request_arg, audio_path, **kwargs):
@@ -165,83 +147,40 @@ async def test_music_only_pipeline_routes_final_prepared_audio_to_audio_delivery
 
     service_harness.delivery_service.deliver_audio_only = fake_deliver_audio_only  # type: ignore[method-assign]
 
-    result = await service_harness.media_pipeline_service.process(request, service_harness.provider)
+    result = await service_harness.media_pipeline_service.process(request, provider)
 
     assert result.audio_receipt is not None
     assert captured["resource_type"] == "music_only"
     assert isinstance(captured["audio_path"], Path)
     assert captured["audio_path"].suffix.lower() == ".mp3"
     assert str(captured["filename"]).endswith(".mp3")
-    assert captured["source_audio_extension"] == "mp4"
+    assert captured["source_audio_extension"] == "mp3"
     assert captured["final_audio_extension"] == "mp3"
 
 
 @pytest.mark.asyncio
-async def test_music_only_runtime_path_prefers_source_video_and_logs_it(service_harness, monkeypatch) -> None:
-    request = _build_music_request(
-        source_video_url="https://www.tiktok.com/@creator/video/9876543210123456790",
-        source_video_id="9876543210123456790",
-    )
-    events: list[tuple[str, dict[str, object]]] = []
+async def test_audio_only_runtime_path_uses_download_audio_not_video(service_harness) -> None:
+    request = _build_audio_only_request()
+    provider = service_harness.generic_providers[Platform.LIKEE]
 
-    def fake_log_event(logger, level, event_name, **fields) -> None:
-        del logger, level
-        events.append((event_name, fields))
+    async def fail_download_video(*args, **kwargs):
+        raise AssertionError("download_video must not be called for audio-only requests")
 
-    monkeypatch.setattr("app.application.services.media_pipeline_service.log_event", fake_log_event)
+    provider.download_video = fail_download_video  # type: ignore[method-assign]
 
-    result = await service_harness.media_pipeline_service.process(request, service_harness.provider)
+    result = await service_harness.media_pipeline_service.process(request, provider)
 
     assert result.audio_receipt is not None
-    assert service_harness.provider.download_calls["tiktok:music_only:123456"] == 1
-    assert service_harness.provider.audio_download_calls["tiktok:music_only:123456"] == 0
-    event_names = [event_name for event_name, _ in events]
-    assert "tiktok_music_branch_decision" in event_names
-    assert "tiktok_music_pipeline_using_source_video" in event_names
-    assert "tiktok_music_audio_extracted_from_source_video" in event_names
+    assert provider.audio_download_calls["likee:music_only:audio-123456"] == 1
 
 
 @pytest.mark.asyncio
-async def test_music_only_runtime_path_logs_earliest_video_branch(service_harness, monkeypatch) -> None:
-    request = _build_earliest_music_request()
-    events: list[tuple[str, dict[str, object]]] = []
-
-    def fake_log_event(logger, level, event_name, **fields) -> None:
-        del logger, level
-        events.append((event_name, fields))
-
-    monkeypatch.setattr("app.application.services.media_pipeline_service.log_event", fake_log_event)
-
-    result = await service_harness.media_pipeline_service.process(request, service_harness.provider)
-
-    assert result.audio_receipt is not None
-    event_names = [event_name for event_name, _ in events]
-    assert "tiktok_music_pipeline_using_earliest_video" in event_names
-
-
-@pytest.mark.asyncio
-async def test_music_only_with_source_video_never_calls_download_audio(service_harness) -> None:
-    request = _build_music_request(
-        source_video_url="https://www.tiktok.com/@creator/video/9876543210123456791",
-        source_video_id="9876543210123456791",
-    )
-
-    async def fail_download_audio(*args, **kwargs):
-        raise AssertionError("download_audio must not be called when source_video_url is present")
-
-    service_harness.provider.download_audio = fail_download_audio  # type: ignore[method-assign]
-
-    result = await service_harness.media_pipeline_service.process(request, service_harness.provider)
-
-    assert result.audio_receipt is not None
-
-
-@pytest.mark.asyncio
-async def test_music_only_transcode_failure_does_not_emit_prepared_metadata_and_logs_unavailable_asset(
+async def test_audio_only_transcode_failure_does_not_emit_prepared_metadata_and_logs_unavailable_asset(
     service_harness, monkeypatch
 ) -> None:
-    request = _build_music_request()
-    service_harness.ffmpeg.transcode_fail_keys.add("tiktok:music_only:123456")
+    request = _build_audio_only_request()
+    provider = service_harness.generic_providers[Platform.LIKEE]
+    service_harness.ffmpeg.transcode_fail_keys.add("likee:music_only:audio-123456")
     events: list[tuple[str, dict[str, object]]] = []
 
     def fake_log_event(logger, level, event_name, **fields) -> None:
@@ -250,7 +189,7 @@ async def test_music_only_transcode_failure_does_not_emit_prepared_metadata_and_
 
     monkeypatch.setattr("app.application.services.media_pipeline_service.log_event", fake_log_event)
 
-    result = await service_harness.media_pipeline_service.process(request, service_harness.provider)
+    result = await service_harness.media_pipeline_service.process(request, provider)
 
     assert result.audio_receipt is None
     assert result.delivery_status == DeliveryStatus.FAILED
@@ -261,14 +200,14 @@ async def test_music_only_transcode_failure_does_not_emit_prepared_metadata_and_
     unavailable = unavailable_events[0]
     assert unavailable["resource_type"] == "music_only"
     assert str(unavailable["audio_filename"]).endswith(".mp3")
-    assert unavailable["source_audio_extension"] == "m4a"
+    assert unavailable["source_audio_extension"] == "mp3"
     assert unavailable["final_audio_extension"] == "mp3"
     assert unavailable["error_message"] == "transcode failed"
 
 
 @pytest.mark.asyncio
-async def test_music_only_delivery_logs_started_and_finished(service_harness, tmp_path: Path, monkeypatch) -> None:
-    request = _build_music_request()
+async def test_audio_only_delivery_logs_started_and_finished(service_harness, tmp_path: Path, monkeypatch) -> None:
+    request = _build_audio_only_request()
     audio_path = tmp_path / "prepared.mp3"
     audio_path.write_bytes(b"mp3-bytes")
     events: list[tuple[str, dict[str, object]]] = []
@@ -286,7 +225,7 @@ async def test_music_only_delivery_logs_started_and_finished(service_harness, tm
         performer="Creator",
         duration_sec=15,
         filename="Creator - Original sound.mp3",
-        source_audio_extension="m4a",
+        source_audio_extension="mp3",
         final_audio_extension="mp3",
     )
 
@@ -298,8 +237,8 @@ async def test_music_only_delivery_logs_started_and_finished(service_harness, tm
 
 
 @pytest.mark.asyncio
-async def test_music_only_validation_failure_logs_context(service_harness, tmp_path: Path, monkeypatch) -> None:
-    request = _build_music_request()
+async def test_audio_only_validation_failure_logs_context(service_harness, tmp_path: Path, monkeypatch) -> None:
+    request = _build_audio_only_request()
     audio_path = tmp_path / "prepared.m4a"
     audio_path.write_bytes(b"m4a-bytes")
     events: list[tuple[str, dict[str, object]]] = []
@@ -325,7 +264,7 @@ async def test_music_only_validation_failure_logs_context(service_harness, tmp_p
     validation_events = [fields for event_name, fields in events if event_name == "telegram_audio_validation_failed"]
     assert len(validation_events) == 1
     failure = validation_events[0]
-    assert failure["normalized_key"] == "tiktok:music_only:123456"
+    assert failure["normalized_key"] == "likee:music_only:audio-123456"
     assert failure["resource_type"] == "music_only"
     assert failure["final_audio_path"] == str(audio_path)
     assert failure["audio_file_exists"] is True
@@ -339,7 +278,7 @@ async def test_music_only_validation_failure_logs_context(service_harness, tmp_p
 
 @pytest.mark.asyncio
 async def test_audio_delivery_failure_logging_includes_exception_and_file_context(service_harness, tmp_path: Path, monkeypatch) -> None:
-    request = _build_music_request()
+    request = _build_audio_only_request()
     audio_path = tmp_path / "prepared.mp3"
     audio_path.write_bytes(b"mp3-bytes")
     service_harness.gateway.fail_audio_upload = True
@@ -358,7 +297,7 @@ async def test_audio_delivery_failure_logging_includes_exception_and_file_contex
         performer="Creator",
         duration_sec=15,
         filename="Creator - Original sound.mp3",
-        source_audio_extension="m4a",
+        source_audio_extension="mp3",
         final_audio_extension="mp3",
     )
 
