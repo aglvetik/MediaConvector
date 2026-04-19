@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from app import messages
 from app.domain.entities.media_result import DeliveryReceipt, MediaMetadata, MediaResult
 from app.domain.entities.media_request import MediaRequest
 from app.domain.entities.normalized_resource import NormalizedResource
@@ -61,6 +62,36 @@ async def test_tiktok_music_fallback_m4a_is_prepared_as_real_mp3(service_harness
     assert asset.container_extension == "mp3"
     assert asset.final_audio_path.exists()
     assert service_harness.ffmpeg.calls["transcode:tiktok:music_only:123456"] == 1
+
+
+@pytest.mark.asyncio
+async def test_music_only_preparation_result_contains_non_null_final_audio_path(service_harness, tmp_path: Path) -> None:
+    request = _build_music_request()
+    source_path = tmp_path / "fallback-source.m4a"
+    source_path.write_bytes(b"m4a-bytes")
+
+    result = await service_harness.media_pipeline_service._prepare_audio_delivery_asset(  # type: ignore[attr-defined]
+        request=request,
+        metadata=MediaMetadata(
+            title="Original sound",
+            duration_sec=15,
+            author="Creator",
+            description=None,
+            size_bytes=123,
+            has_audio=True,
+        ),
+        source_path=source_path,
+        work_dir=tmp_path,
+        fatal_on_failure=True,
+        missing_notice=messages.TEMPORARY_DOWNLOAD_ERROR,
+        failure_notice=messages.TEMPORARY_DOWNLOAD_ERROR,
+    )
+
+    assert result.is_prepared is True
+    assert result.asset is not None
+    assert result.asset.final_audio_path.exists()
+    assert result.asset.final_audio_path.suffix.lower() == ".mp3"
+    assert result.asset.telegram_filename.endswith(".mp3")
 
 
 @pytest.mark.asyncio
@@ -122,6 +153,35 @@ async def test_music_only_pipeline_routes_final_prepared_audio_to_audio_delivery
     assert str(captured["filename"]).endswith(".mp3")
     assert captured["source_audio_extension"] == "m4a"
     assert captured["final_audio_extension"] == "mp3"
+
+
+@pytest.mark.asyncio
+async def test_music_only_transcode_failure_does_not_emit_prepared_metadata_and_logs_unavailable_asset(
+    service_harness, monkeypatch
+) -> None:
+    request = _build_music_request()
+    service_harness.ffmpeg.transcode_fail_keys.add("tiktok:music_only:123456")
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def fake_log_event(logger, level, event_name, **fields) -> None:
+        del logger, level
+        events.append((event_name, fields))
+
+    monkeypatch.setattr("app.application.services.media_pipeline_service.log_event", fake_log_event)
+
+    result = await service_harness.media_pipeline_service.process(request, service_harness.provider)
+
+    assert result.audio_receipt is None
+    assert result.delivery_status == DeliveryStatus.FAILED
+    event_names = [event_name for event_name, _ in events]
+    assert "audio_metadata_prepared" not in event_names
+    unavailable_events = [fields for event_name, fields in events if event_name == "audio_delivery_asset_unavailable"]
+    assert len(unavailable_events) == 1
+    unavailable = unavailable_events[0]
+    assert unavailable["resource_type"] == "music_only"
+    assert str(unavailable["audio_filename"]).endswith(".mp3")
+    assert unavailable["source_audio_extension"] == "m4a"
+    assert unavailable["final_audio_extension"] == "mp3"
 
 
 @pytest.mark.asyncio

@@ -343,6 +343,20 @@ class MediaPipelineService:
                 missing_notice=messages.TEMPORARY_DOWNLOAD_ERROR,
                 failure_notice=messages.TEMPORARY_DOWNLOAD_ERROR,
             )
+        if source_audio_path is not None and not audio_result.is_prepared:
+            log_event(
+                self._logger,
+                30,
+                "audio_delivery_asset_unavailable",
+                request_id=request.request_id,
+                chat_id=request.chat_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                resource_type=request.normalized_resource.resource_type,
+                audio_filename=audio_result.telegram_filename,
+                source_audio_extension=audio_result.source_audio_extension,
+                final_audio_extension=audio_result.final_audio_extension,
+                error_code=audio_result.error_code or "prepared_audio_missing",
+            )
         media_result = await self._delivery_service.deliver_audio_only(
             request,
             audio_result.asset.file_path if audio_result.is_prepared else None,
@@ -801,6 +815,46 @@ class MediaPipelineService:
                 preferred_container=preferred_container,
                 fallback_cover_path=fallback_cover_path,
             )
+            mismatch_reason = self._validate_prepared_audio_asset(asset)
+            if mismatch_reason is not None:
+                log_event(
+                    self._logger,
+                    40,
+                    "audio_prepared_asset_invalid",
+                    request_id=request.request_id,
+                    normalized_key=request.normalized_resource.normalized_key,
+                    source_type=request.normalized_resource.platform.value,
+                    final_audio_path=str(asset.final_audio_path),
+                    audio_file_exists=asset.final_audio_path.exists(),
+                    audio_file_size=asset.final_audio_path.stat().st_size if asset.final_audio_path.exists() else None,
+                    telegram_filename=asset.telegram_filename,
+                    source_audio_extension=asset.source_audio_extension,
+                    final_audio_extension=asset.container_extension,
+                    mismatch_reason=mismatch_reason,
+                )
+                return PreparedAudioResult(
+                    status="failed_fatal" if fatal_on_failure else "failed_non_fatal",
+                    notice=messages.TEMPORARY_DOWNLOAD_ERROR if fatal_on_failure else failure_notice,
+                    error_code="prepared_audio_invalid",
+                    telegram_filename=asset.telegram_filename,
+                    source_audio_extension=asset.source_audio_extension,
+                    final_audio_extension=asset.container_extension,
+                )
+            log_event(
+                self._logger,
+                20,
+                "audio_metadata_prepared",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                title=asset.title,
+                performer=asset.performer,
+                duration_sec=asset.duration_sec,
+                thumbnail_available=asset.thumbnail_path is not None,
+                audio_filename=asset.telegram_filename,
+                source_audio_extension=asset.source_audio_extension,
+                final_audio_extension=asset.container_extension,
+                final_audio_path=str(asset.final_audio_path),
+            )
             return PreparedAudioResult(
                 status="prepared",
                 asset=asset,
@@ -833,6 +887,12 @@ class MediaPipelineService:
                 normalized_key=request.normalized_resource.normalized_key,
                 source_type=request.normalized_resource.platform.value,
                 error_code=getattr(exc, "error_code", "audio_prepare_failed"),
+                source_audio_path=str(source_path),
+                audio_filename=intended_filename,
+                source_audio_extension=source_extension,
+                final_audio_extension=final_extension,
+                exception_type=type(exc).__name__,
+                exception_message=str(exc),
             )
             return PreparedAudioResult(
                 status="failed_fatal" if fatal_on_failure else "failed_non_fatal",
@@ -863,20 +923,6 @@ class MediaPipelineService:
             request=request,
             work_dir=work_dir,
             fallback_cover_path=fallback_cover_path,
-        )
-        log_event(
-            self._logger,
-            20,
-            "audio_metadata_prepared",
-            request_id=request.request_id,
-            normalized_key=request.normalized_resource.normalized_key,
-            title=title,
-            performer=performer,
-            duration_sec=duration_sec,
-            thumbnail_available=thumbnail_path is not None,
-            audio_filename=filename,
-            source_audio_extension=source_extension,
-            final_audio_extension=final_extension,
         )
         output_path = work_dir / filename
         if preferred_container == "mp3":
@@ -1016,3 +1062,22 @@ class MediaPipelineService:
     def _resolve_audio_extension(source_path: Path) -> str:
         extension = source_path.suffix.lower().lstrip(".")
         return extension or "bin"
+
+    @staticmethod
+    def _validate_prepared_audio_asset(asset: PreparedAudioAsset) -> str | None:
+        path = asset.final_audio_path
+        if path is None:
+            return "final_audio_path_missing"
+        if not path.exists():
+            return "final_audio_file_missing"
+        if path.stat().st_size <= 0:
+            return "final_audio_file_empty"
+        path_extension = path.suffix.lower().lstrip(".")
+        if asset.container_extension and path_extension != asset.container_extension.lower():
+            return "container_extension_mismatch"
+        filename_extension = Path(asset.telegram_filename).suffix.lower().lstrip(".")
+        if filename_extension and path_extension and filename_extension != path_extension:
+            return "telegram_filename_extension_mismatch"
+        if asset.container_extension.lower() == "mp3" and path.suffix.lower() != ".mp3":
+            return "final_audio_mp3_suffix_missing"
+        return None
