@@ -7,9 +7,11 @@ from urllib.parse import urlparse
 
 from app.domain.entities.media_result import DeliveryReceipt, MediaMetadata
 from app.domain.entities.normalized_resource import NormalizedResource
+from app.domain.entities.visual_media_entry import VisualMediaEntry
 from app.domain.enums.platform import Platform
 from app.domain.errors import (
     AudioExtractionError,
+    DownloadError,
     InvalidCachedMediaError,
     MediaTooLargeError,
     NormalizationError,
@@ -34,6 +36,8 @@ class FakeProvider:
         self.image_download_calls: dict[str, int] = defaultdict(int)
         self.has_audio: dict[str, bool] = defaultdict(lambda: True)
         self.photo_counts: dict[str, int] = defaultdict(lambda: 3)
+        self.broken_image_entries: dict[str, set[int]] = defaultdict(set)
+        self.audio_fail_keys: set[str] = set()
         self.invalid_urls: set[str] = set()
 
     def extract_first_url(self, text: str) -> str | None:
@@ -75,11 +79,17 @@ class FakeProvider:
             normalized_key=normalized_key,
             original_url=url,
             canonical_url=url.split("?", 1)[0],
+            media_kind="gallery" if resource_type == "photo_post" and len(image_urls) > 1 else ("photo" if resource_type == "photo_post" else ("audio" if resource_type == "music_only" else "video")),
             title=resource_type,
             author="author",
             audio_url=audio_url,
             image_urls=image_urls,
+            image_entries=tuple(
+                VisualMediaEntry(source_url=image_url, order=index, mime_type_hint="image/jpeg")
+                for index, image_url in enumerate(image_urls, start=1)
+            ),
             duration_sec=10,
+            has_expected_audio=audio_url is not None if resource_type != "video" else None,
         )
 
     async def fetch_metadata(self, normalized: NormalizedResource) -> MediaMetadata:
@@ -100,18 +110,39 @@ class FakeProvider:
 
     async def download_audio(self, normalized: NormalizedResource, work_dir: Path) -> Path | None:
         self.audio_download_calls[normalized.normalized_key] += 1
+        if normalized.normalized_key in self.audio_fail_keys:
+            raise DownloadError("audio download failed", temporary=True)
         if not self.has_audio[normalized.normalized_key]:
             return None
         path = work_dir / f"{normalized.resource_id}.m4a"
         path.write_bytes(b"audio-bytes")
         return path
 
+    async def download_image_entry(
+        self,
+        normalized: NormalizedResource,
+        work_dir: Path,
+        *,
+        source_url: str,
+        entry_index: int,
+    ) -> Path:
+        if entry_index == 1:
+            self.image_download_calls[normalized.normalized_key] += 1
+        if entry_index in self.broken_image_entries[normalized.normalized_key]:
+            raise DownloadError("image download failed", temporary=True)
+        path = work_dir / f"{normalized.resource_id}-{entry_index}.jpg"
+        path.write_bytes(f"image-{entry_index}".encode("utf-8"))
+        return path
+
     async def download_images(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, ...]:
-        self.image_download_calls[normalized.normalized_key] += 1
         paths: list[Path] = []
         for index, _ in enumerate(normalized.image_urls, start=1):
-            path = work_dir / f"{normalized.resource_id}-{index}.jpg"
-            path.write_bytes(f"image-{index}".encode("utf-8"))
+            path = await self.download_image_entry(
+                normalized,
+                work_dir,
+                source_url=normalized.image_urls[index - 1],
+                entry_index=index,
+            )
             paths.append(path)
         return tuple(paths)
 
@@ -123,6 +154,8 @@ class FakeGenericProvider:
         self.download_calls: dict[str, int] = defaultdict(int)
         self.audio_download_calls: dict[str, int] = defaultdict(int)
         self.image_download_calls: dict[str, int] = defaultdict(int)
+        self.broken_image_entries: dict[str, set[int]] = defaultdict(set)
+        self.audio_fail_keys: set[str] = set()
 
     def extract_first_url(self, text: str) -> str | None:
         return extract_first_supported_url(text, self._platform)
@@ -139,7 +172,7 @@ class FakeGenericProvider:
             resource_type = "photo_post"
             photo_count = 1 if "single" in lowered else 3
             image_urls = tuple(f"https://cdn.example/{resource_id}-{index}.jpg" for index in range(1, photo_count + 1))
-            audio_url = None
+            audio_url = f"https://cdn.example/{resource_id}.m4a" if "with-audio" in lowered else None
         elif "audio" in lowered or "sound" in lowered:
             resource_type = "music_only"
             image_urls = ()
@@ -157,27 +190,27 @@ class FakeGenericProvider:
             normalized_key=normalized_key,
             original_url=url,
             canonical_url=url.split("?", 1)[0],
+            media_kind="gallery" if resource_type == "photo_post" and len(image_urls) > 1 else ("photo" if resource_type == "photo_post" else ("audio" if resource_type == "music_only" else "video")),
             title=f"{self._platform.value}-{resource_type}",
             author=f"{self._platform.value}-author",
             audio_url=audio_url,
             image_urls=image_urls,
+            image_entries=tuple(
+                VisualMediaEntry(source_url=image_url, order=index, mime_type_hint="image/jpeg")
+                for index, image_url in enumerate(image_urls, start=1)
+            ),
             duration_sec=60,
+            has_expected_audio=audio_url is not None if resource_type != "video" else None,
         )
 
     async def fetch_metadata(self, normalized: NormalizedResource) -> MediaMetadata:
-        if normalized.resource_type == "photo_post":
-            has_audio = False
-        elif normalized.resource_type == "music_only":
-            has_audio = True
-        else:
-            has_audio = True
         return MediaMetadata(
             title=normalized.title or "media",
             duration_sec=60,
             author=normalized.author or "author",
             description="desc",
             size_bytes=2048,
-            has_audio=has_audio,
+            has_audio=normalized.has_expected_audio if normalized.has_expected_audio is not None else True,
         )
 
     async def download_video(self, normalized: NormalizedResource, work_dir: Path) -> Path:
@@ -188,19 +221,40 @@ class FakeGenericProvider:
 
     async def download_audio(self, normalized: NormalizedResource, work_dir: Path) -> Path | None:
         self.audio_download_calls[normalized.normalized_key] += 1
-        if normalized.resource_type == "photo_post":
+        if normalized.normalized_key in self.audio_fail_keys:
+            raise DownloadError("audio download failed", temporary=True)
+        if normalized.audio_url is None:
             return None
         suffix = ".mp3" if normalized.resource_type == "music_only" else ".m4a"
         path = work_dir / f"{normalized.resource_id}{suffix}"
         path.write_bytes(b"audio-bytes")
         return path
 
+    async def download_image_entry(
+        self,
+        normalized: NormalizedResource,
+        work_dir: Path,
+        *,
+        source_url: str,
+        entry_index: int,
+    ) -> Path:
+        if entry_index == 1:
+            self.image_download_calls[normalized.normalized_key] += 1
+        if entry_index in self.broken_image_entries[normalized.normalized_key]:
+            raise DownloadError("image download failed", temporary=True)
+        path = work_dir / f"{normalized.resource_id}-{entry_index}.jpg"
+        path.write_bytes(f"image-{entry_index}".encode("utf-8"))
+        return path
+
     async def download_images(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, ...]:
-        self.image_download_calls[normalized.normalized_key] += 1
         paths: list[Path] = []
         for index, _ in enumerate(normalized.image_urls, start=1):
-            path = work_dir / f"{normalized.resource_id}-{index}.jpg"
-            path.write_bytes(f"image-{index}".encode("utf-8"))
+            path = await self.download_image_entry(
+                normalized,
+                work_dir,
+                source_url=normalized.image_urls[index - 1],
+                entry_index=index,
+            )
             paths.append(path)
         return tuple(paths)
 

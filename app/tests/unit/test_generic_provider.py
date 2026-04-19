@@ -74,7 +74,36 @@ async def test_generic_provider_normalizes_image_gallery_result() -> None:
     metadata = await provider.fetch_metadata(normalized)
 
     assert normalized.resource_type == "photo_post"
+    assert normalized.media_kind == "gallery"
     assert normalized.image_urls == ("https://cdn.example/1.jpg", "https://cdn.example/2.jpg")
+    assert tuple(entry.source_url for entry in normalized.image_entries) == normalized.image_urls
+    assert metadata.has_audio is False
+
+
+@pytest.mark.asyncio
+async def test_generic_provider_normalizes_single_pinterest_image_result() -> None:
+    provider = YtDlpUrlProvider(
+        platform=Platform.PINTEREST,
+        downloader=StubDownloader(
+            {
+                "id": "pin-1",
+                "title": "Pin",
+                "uploader": "Pinner",
+                "webpage_url": "https://www.pinterest.com/pin/pin-1/",
+                "url": "https://cdn.example/pin-1.jpg",
+                "ext": "jpg",
+            }
+        ),
+        request_timeout_seconds=10,
+    )
+
+    normalized = await provider.normalize("https://www.pinterest.com/pin/pin-1/")
+    metadata = await provider.fetch_metadata(normalized)
+
+    assert normalized.resource_type == "photo_post"
+    assert normalized.media_kind == "photo"
+    assert normalized.entry_count == 1
+    assert normalized.image_entries[0].source_url == "https://cdn.example/pin-1.jpg"
     assert metadata.has_audio is False
 
 

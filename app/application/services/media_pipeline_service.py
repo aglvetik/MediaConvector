@@ -13,6 +13,7 @@ from app.domain.entities.cache_entry import CacheEntry
 from app.domain.entities.download_job import DownloadJob
 from app.domain.entities.media_request import MediaRequest
 from app.domain.entities.media_result import MediaMetadata, MediaResult
+from app.domain.entities.visual_media_entry import VisualMediaEntry
 from app.domain.enums.delivery_status import DeliveryStatus
 from app.domain.enums.job_status import JobStatus
 from app.domain.errors import AudioExtractionError, DownloadError, InvalidCachedMediaError
@@ -178,25 +179,50 @@ class MediaPipelineService:
         provider: DownloaderProvider,
         work_dir: Path,
     ) -> OwnerPipelineResult:
-        metadata = await provider.fetch_metadata(request.normalized_resource)
-        photo_paths = await provider.download_images(request.normalized_resource, work_dir)
-        audio_expected = metadata.has_audio is not False
-        audio_path = await provider.download_audio(request.normalized_resource, work_dir) if audio_expected else None
-        media_result = await self._delivery_service.deliver_photo_post_uploads(
-            request,
-            photo_paths,
-            audio_path,
-            audio_expected=audio_expected,
-            missing_audio_notice=messages.NO_AUDIO_TRACK if audio_expected else None,
-        )
-        cache_entry = await self._cache_service.save_photo_delivery_result(
-            resource=request.normalized_resource,
-            metadata=metadata,
-            photo_receipts=media_result.photo_receipts,
-            audio_receipt=media_result.audio_receipt,
-            notice=media_result.user_notice,
-        )
-        return OwnerPipelineResult(media_result=media_result, cache_entry=cache_entry)
+        try:
+            metadata = await provider.fetch_metadata(request.normalized_resource)
+            photo_paths = await self._prepare_visual_entries(request, provider, work_dir)
+            audio_expected = (
+                request.normalized_resource.has_expected_audio
+                if request.normalized_resource.has_expected_audio is not None
+                else metadata.has_audio is not False
+            )
+            audio_path: Path | None = None
+            missing_audio_notice: str | None = None
+            if audio_expected:
+                try:
+                    audio_path = await provider.download_audio(request.normalized_resource, work_dir)
+                    missing_audio_notice = messages.NO_AUDIO_TRACK if audio_path is None else None
+                except Exception as exc:
+                    log_event(
+                        self._logger,
+                        30,
+                        "optional_audio_failed",
+                        request_id=request.request_id,
+                        normalized_key=request.normalized_resource.normalized_key,
+                        source_type=request.normalized_resource.platform.value,
+                        error_code=getattr(exc, "error_code", "download_failed"),
+                    )
+                    audio_path = None
+                    missing_audio_notice = messages.SEPARATE_AUDIO_SEND_FAILED
+            media_result = await self._delivery_service.deliver_photo_post_uploads(
+                request,
+                photo_paths,
+                audio_path,
+                audio_expected=audio_expected,
+                missing_audio_notice=missing_audio_notice,
+            )
+            cache_entry = await self._cache_service.save_photo_delivery_result(
+                resource=request.normalized_resource,
+                metadata=metadata,
+                photo_receipts=media_result.photo_receipts,
+                audio_receipt=media_result.audio_receipt,
+                notice=media_result.user_notice,
+            )
+            return OwnerPipelineResult(media_result=media_result, cache_entry=cache_entry)
+        except Exception:
+            self._logger.exception("visual_pipeline_crash")
+            raise
 
     async def _run_audio_only_pipeline(
         self,
@@ -371,3 +397,111 @@ class MediaPipelineService:
                 error_code=exc.error_code,
             )
             return None, messages.AUDIO_EXTRACTION_FAILED
+
+    async def _prepare_visual_entries(
+        self,
+        request: MediaRequest,
+        provider: DownloaderProvider,
+        work_dir: Path,
+    ) -> tuple[Path, ...]:
+        entries = request.normalized_resource.image_entries or tuple(
+            VisualMediaEntry(source_url=image_url, order=index)
+            for index, image_url in enumerate(request.normalized_resource.image_urls, start=1)
+        )
+        log_event(
+            self._logger,
+            20,
+            "gallery_artifact_built" if len(entries) > 1 else "visual_artifact_built",
+            request_id=request.request_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            canonical_url=request.normalized_resource.canonical_url,
+            image_count=len(entries),
+            has_expected_audio=request.normalized_resource.has_expected_audio,
+        )
+
+        valid_paths: list[Path] = []
+        skipped_count = 0
+        for entry in entries:
+            log_event(
+                self._logger,
+                20,
+                "image_download_started",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                canonical_url=request.normalized_resource.canonical_url,
+                image_index=entry.order,
+                image_url=entry.source_url,
+            )
+            try:
+                path = await provider.download_image_entry(
+                    request.normalized_resource,
+                    work_dir,
+                    source_url=entry.source_url,
+                    entry_index=entry.order,
+                )
+            except Exception as exc:
+                skipped_count += 1
+                log_event(
+                    self._logger,
+                    30,
+                    "image_download_failed",
+                    request_id=request.request_id,
+                    normalized_key=request.normalized_resource.normalized_key,
+                    source_type=request.normalized_resource.platform.value,
+                    canonical_url=request.normalized_resource.canonical_url,
+                    image_index=entry.order,
+                    image_url=entry.source_url,
+                    error_code=getattr(exc, "error_code", "download_failed"),
+                )
+                continue
+            valid_paths.append(path)
+            log_event(
+                self._logger,
+                20,
+                "image_download_finished",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                canonical_url=request.normalized_resource.canonical_url,
+                image_index=entry.order,
+                file_path=str(path),
+            )
+
+        valid_count = len(valid_paths)
+        log_event(
+            self._logger,
+            20,
+            "gallery_prepared",
+            request_id=request.request_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            canonical_url=request.normalized_resource.canonical_url,
+            image_count=len(entries),
+            valid_image_count=valid_count,
+            skipped_image_count=skipped_count,
+        )
+        if skipped_count:
+            log_event(
+                self._logger,
+                20,
+                "gallery_partial_success",
+                request_id=request.request_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                canonical_url=request.normalized_resource.canonical_url,
+                image_count=len(entries),
+                valid_image_count=valid_count,
+                skipped_image_count=skipped_count,
+            )
+        if not valid_paths:
+            raise DownloadError(
+                "No visual entries could be prepared for delivery.",
+                temporary=False,
+                context={
+                    "normalized_key": request.normalized_resource.normalized_key,
+                    "image_count": len(entries),
+                },
+            )
+        return tuple(valid_paths)

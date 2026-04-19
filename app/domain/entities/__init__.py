@@ -4,6 +4,7 @@ from app.domain.entities.media_request import MediaRequest
 from app.domain.entities.media_result import DeliveryReceipt, MediaMetadata, MediaResult
 from app.domain.entities.normalized_resource import NormalizedResource
 from app.domain.entities.source_media_artifact import SourceMediaArtifact
+from app.domain.entities.visual_media_entry import VisualMediaEntry
 
 __all__ = [
     "CacheEntry",
@@ -14,4 +15,5 @@ __all__ = [
     "MediaResult",
     "NormalizedResource",
     "SourceMediaArtifact",
+    "VisualMediaEntry",
 ]

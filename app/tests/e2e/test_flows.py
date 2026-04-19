@@ -250,6 +250,64 @@ async def test_instagram_gallery_flow_sends_photos_without_no_audio_notice(servi
     assert service_harness.generic_providers[Platform.INSTAGRAM].image_download_calls["instagram:photo_post:gallery-123"] == 1
 
 
+async def test_gallery_with_one_broken_entry_still_sends_remaining_images(service_harness) -> None:
+    normalized_key = "instagram:photo_post:gallery-broken-1"
+    service_harness.generic_providers[Platform.INSTAGRAM].broken_image_entries[normalized_key].add(2)
+
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(
+            chat_id=1,
+            user_id=409,
+            message_id=31,
+            chat_type="private",
+            text="https://www.instagram.com/p/gallery-broken-1/",
+        )
+    )
+
+    assert handled is True
+    assert len(service_harness.gateway.sent_photo_receipts) == 2
+    assert service_harness.gateway.text_messages == []
+
+
+async def test_gallery_with_all_broken_entries_fails_cleanly(service_harness) -> None:
+    normalized_key = "facebook:photo_post:gallery-all-broken"
+    service_harness.generic_providers[Platform.FACEBOOK].broken_image_entries[normalized_key].update({1, 2, 3})
+
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(
+            chat_id=1,
+            user_id=410,
+            message_id=32,
+            chat_type="private",
+            text="https://www.facebook.com/gallery-all-broken",
+        )
+    )
+
+    assert handled is True
+    assert len(service_harness.gateway.sent_photo_receipts) == 0
+    assert service_harness.gateway.text_messages[-1].text == messages.VIDEO_UNAVAILABLE
+
+
+async def test_visual_post_with_optional_audio_failure_still_sends_images(service_harness) -> None:
+    normalized_key = "instagram:photo_post:gallery-with-audio-777"
+    service_harness.generic_providers[Platform.INSTAGRAM].audio_fail_keys.add(normalized_key)
+
+    handled = await service_harness.process_message_service.handle_message(
+        IncomingMessage(
+            chat_id=1,
+            user_id=411,
+            message_id=33,
+            chat_type="private",
+            text="https://www.instagram.com/p/gallery-with-audio-777/",
+        )
+    )
+
+    assert handled is True
+    assert len(service_harness.gateway.sent_photo_receipts) == 3
+    assert len(service_harness.gateway.sent_audio_receipts) == 0
+    assert service_harness.gateway.text_messages[-1].text == messages.SEPARATE_AUDIO_SEND_FAILED
+
+
 async def test_single_photo_source_sends_single_photo(service_harness) -> None:
     url = "https://www.pinterest.com/pin/single-42/"
     handled = await service_harness.process_message_service.handle_message(

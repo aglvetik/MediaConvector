@@ -10,6 +10,7 @@ import httpx
 
 from app.domain.entities.media_result import MediaMetadata
 from app.domain.entities.normalized_resource import NormalizedResource
+from app.domain.entities.visual_media_entry import VisualMediaEntry
 from app.domain.enums.platform import Platform
 from app.domain.enums.tiktok_resource_type import TikTokResourceType
 from app.domain.errors import DownloadError, NormalizationError, UnsupportedUrlError
@@ -100,13 +101,23 @@ class TikTokProvider:
             normalized_key=build_cache_key(Platform.TIKTOK, resource_type.value, resource_id),
             original_url=original_url,
             canonical_url=canonical_url or resolved_url,
+            media_kind=self._resolve_media_kind(resource_type, image_urls),
             title=title,
             author=author,
             video_url=video_url,
             audio_url=audio_url,
             image_urls=image_urls,
+            image_entries=tuple(
+                VisualMediaEntry(
+                    source_url=image_url,
+                    order=index,
+                    mime_type_hint=f"image/{'jpeg' if self._guess_extension(image_url, default='jpg') == 'jpg' else self._guess_extension(image_url, default='jpg')}",
+                )
+                for index, image_url in enumerate(image_urls, start=1)
+            ),
             thumbnail_url=thumbnail_url,
             duration_sec=duration_sec,
+            has_expected_audio=audio_url is not None if resource_type != TikTokResourceType.VIDEO else None,
         )
         log_event(
             self._logger,
@@ -118,6 +129,16 @@ class TikTokProvider:
         )
         if resource_type == TikTokResourceType.PHOTO_POST:
             log_event(self._logger, 20, "tiktok_photo_post_detected", normalized_key=normalized.normalized_key)
+            log_event(
+                self._logger,
+                20,
+                "gallery_artifact_built" if len(image_urls) > 1 else "visual_artifact_built",
+                normalized_key=normalized.normalized_key,
+                source_type=Platform.TIKTOK.value,
+                canonical_url=normalized.canonical_url,
+                image_count=len(image_urls),
+                has_expected_audio=normalized.has_expected_audio,
+            )
         elif resource_type == TikTokResourceType.MUSIC_ONLY:
             log_event(self._logger, 20, "tiktok_music_link_detected", normalized_key=normalized.normalized_key)
         else:
@@ -157,11 +178,27 @@ class TikTokProvider:
         await self._download_binary(normalized.audio_url, audio_path)
         return audio_path
 
+    async def download_image_entry(
+        self,
+        normalized: NormalizedResource,
+        work_dir: Path,
+        *,
+        source_url: str,
+        entry_index: int,
+    ) -> Path:
+        image_path = work_dir / f"{normalized.resource_id}-photo-{entry_index}.{self._guess_extension(source_url, default='jpg')}"
+        await self._download_binary(source_url, image_path)
+        return image_path
+
     async def download_images(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, ...]:
         paths: list[Path] = []
         for index, image_url in enumerate(normalized.image_urls, start=1):
-            image_path = work_dir / f"{normalized.resource_id}-photo-{index}.{self._guess_extension(image_url, default='jpg')}"
-            await self._download_binary(image_url, image_path)
+            image_path = await self.download_image_entry(
+                normalized,
+                work_dir,
+                source_url=image_url,
+                entry_index=index,
+            )
             paths.append(image_path)
         return tuple(paths)
 
@@ -241,6 +278,14 @@ class TikTokProvider:
         if self._looks_like_music_only(info):
             return TikTokResourceType.MUSIC_ONLY
         return TikTokResourceType.VIDEO
+
+    @staticmethod
+    def _resolve_media_kind(resource_type: TikTokResourceType, image_urls: tuple[str, ...]) -> str:
+        if resource_type == TikTokResourceType.MUSIC_ONLY:
+            return "audio"
+        if resource_type == TikTokResourceType.PHOTO_POST:
+            return "gallery" if len(image_urls) > 1 else "photo"
+        return "video"
 
     @staticmethod
     def _resolve_resource_id(canonical_url: str, info: dict[str, object], resource_type: TikTokResourceType) -> str:

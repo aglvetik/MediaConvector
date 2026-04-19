@@ -148,6 +148,17 @@ class DeliveryService:
         log_event(
             self._logger,
             20,
+            "gallery_delivery_started",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            image_count=len(photo_paths),
+            cached=False,
+        )
+        log_event(
+            self._logger,
+            20,
             "telegram_delivery_started",
             request_id=request.request_id,
             chat_id=request.chat_id,
@@ -187,6 +198,18 @@ class DeliveryService:
             source_type=request.normalized_resource.platform.value,
             cached=False,
             resource_type=request.normalized_resource.resource_type,
+            delivery_status=result.delivery_status.value,
+        )
+        log_event(
+            self._logger,
+            20,
+            "gallery_delivery_finished",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            image_count=len(photo_receipts),
+            cached=False,
             delivery_status=result.delivery_status.value,
         )
         return result
@@ -396,25 +419,49 @@ class DeliveryService:
         )
 
     async def _deliver_photo_post_from_cache(self, request: MediaRequest, cache_entry: CacheEntry) -> MediaResult:
+        log_event(
+            self._logger,
+            20,
+            "gallery_delivery_started",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            image_count=len(cache_entry.photo_file_ids),
+            cached=True,
+        )
         photo_receipts = await self._send_photo_group_with_fallback(
             request,
             photo_file_ids=cache_entry.photo_file_ids,
             cached=True,
         )
         if not cache_entry.has_audio:
-            return self._build_result(
+            result = self._build_result(
                 primary_sent=bool(photo_receipts),
                 audio_requested=False,
                 audio_receipt=None,
                 cache_hit=True,
                 photo_receipts=photo_receipts,
             )
+            log_event(
+                self._logger,
+                20,
+                "gallery_delivery_finished",
+                request_id=request.request_id,
+                chat_id=request.chat_id,
+                normalized_key=request.normalized_resource.normalized_key,
+                source_type=request.normalized_resource.platform.value,
+                image_count=len(photo_receipts),
+                cached=True,
+                delivery_status=result.delivery_status.value,
+            )
+            return result
         audio_receipt, notice = await self._send_optional_audio_from_cache(
             request,
             cache_entry,
             primary_sent=bool(photo_receipts),
         )
-        return self._build_result(
+        result = self._build_result(
             primary_sent=bool(photo_receipts),
             audio_requested=True,
             audio_receipt=audio_receipt,
@@ -422,6 +469,19 @@ class DeliveryService:
             notice=notice,
             photo_receipts=photo_receipts,
         )
+        log_event(
+            self._logger,
+            20,
+            "gallery_delivery_finished",
+            request_id=request.request_id,
+            chat_id=request.chat_id,
+            normalized_key=request.normalized_resource.normalized_key,
+            source_type=request.normalized_resource.platform.value,
+            image_count=len(photo_receipts),
+            cached=True,
+            delivery_status=result.delivery_status.value,
+        )
+        return result
 
     async def _deliver_primary_audio_from_cache(
         self,

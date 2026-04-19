@@ -28,5 +28,15 @@ class DownloaderProvider(Protocol):
     async def download_audio(self, normalized: NormalizedResource, work_dir: Path) -> Path | None:
         ...
 
+    async def download_image_entry(
+        self,
+        normalized: NormalizedResource,
+        work_dir: Path,
+        *,
+        source_url: str,
+        entry_index: int,
+    ) -> Path:
+        ...
+
     async def download_images(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, ...]:
         ...
