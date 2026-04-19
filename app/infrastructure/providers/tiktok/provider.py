@@ -38,6 +38,15 @@ _WEB_JSON_PATTERNS = (
 )
 _IMAGE_URL_PATTERN = re.compile(r"https?://[^\s\"']+\.(?:jpg|jpeg|png|webp)(?:[^\s\"']*)", re.IGNORECASE)
 _AUDIO_URL_PATTERN = re.compile(r"https?://[^\s\"']+tiktokcdn\.com[^\s\"']+(?:\.mp3|\.m4a)?[^\s\"']*", re.IGNORECASE)
+_TIKTOK_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Referer": "https://www.tiktok.com/",
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 class TikTokProvider:
@@ -186,8 +195,15 @@ class TikTokProvider:
         source_url: str,
         entry_index: int,
     ) -> Path:
-        image_path = work_dir / f"{normalized.resource_id}-photo-{entry_index}.{self._guess_extension(source_url, default='jpg')}"
-        await self._download_binary(source_url, image_path)
+        normalized_url = self._normalize_image_url(source_url)
+        image_path = work_dir / f"{normalized.resource_id}-photo-{entry_index}.{self._guess_extension(normalized_url, default='jpg')}"
+        await self._download_binary(
+            normalized_url,
+            image_path,
+            original_url=source_url,
+            headers=self._asset_headers(normalized_url),
+            allow_https_retry=True,
+        )
         return image_path
 
     async def download_images(self, normalized: NormalizedResource, work_dir: Path) -> tuple[Path, ...]:
@@ -250,22 +266,71 @@ class TikTokProvider:
                 continue
         return {}
 
-    async def _download_binary(self, url: str, destination: Path) -> None:
-        try:
-            async with httpx.AsyncClient(timeout=self._request_timeout_seconds, follow_redirects=True) as client:
-                response = await client.get(
-                    url,
-                    headers={
-                        "User-Agent": (
-                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-                        )
+    async def _download_binary(
+        self,
+        url: str,
+        destination: Path,
+        *,
+        original_url: str | None = None,
+        headers: dict[str, str] | None = None,
+        allow_https_retry: bool = False,
+    ) -> None:
+        normalized_url = url
+        attempted_https_upgrade = (
+            (original_url or url).startswith("http://") and normalized_url.startswith("https://")
+        )
+        attempt_plan = [normalized_url]
+        if allow_https_retry and normalized_url.startswith("http://"):
+            secure_url = "https://" + normalized_url.removeprefix("http://")
+            if secure_url != normalized_url:
+                attempt_plan.append(secure_url)
+
+        last_error: DownloadError | None = None
+        for index, candidate_url in enumerate(attempt_plan):
+            attempted_https_upgrade = attempted_https_upgrade or index > 0
+            try:
+                async with httpx.AsyncClient(timeout=self._request_timeout_seconds, follow_redirects=True) as client:
+                    response = await client.get(candidate_url, headers=headers or self._default_headers())
+                    response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                last_error = DownloadError(
+                    "Failed to fetch TikTok binary asset.",
+                    context={
+                        "url": candidate_url,
+                        "original_url": original_url or url,
+                        "normalized_url": candidate_url,
+                        "https_upgrade_attempted": attempted_https_upgrade,
+                        "status_code": exc.response.status_code,
+                        "exception": str(exc),
                     },
                 )
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise DownloadError("Failed to fetch TikTok binary asset.", context={"url": url}) from exc
-        destination.write_bytes(response.content)
+                continue
+            except httpx.HTTPError as exc:
+                last_error = DownloadError(
+                    "Failed to fetch TikTok binary asset.",
+                    context={
+                        "url": candidate_url,
+                        "original_url": original_url or url,
+                        "normalized_url": candidate_url,
+                        "https_upgrade_attempted": attempted_https_upgrade,
+                        "exception": str(exc),
+                    },
+                )
+                continue
+            destination.write_bytes(response.content)
+            return
+
+        if last_error is not None:
+            raise last_error
+        raise DownloadError(
+            "Failed to fetch TikTok binary asset.",
+            context={
+                "url": normalized_url,
+                "original_url": original_url or url,
+                "normalized_url": normalized_url,
+                "https_upgrade_attempted": attempted_https_upgrade,
+            },
+        )
 
     def _resolve_resource_type(self, canonical_url: str, info: dict[str, object]) -> TikTokResourceType:
         path = urlparse(canonical_url).path.lower()
@@ -325,24 +390,29 @@ class TikTokProvider:
             for entry in entries:
                 if not isinstance(entry, dict):
                     continue
-                for candidate in (
-                    entry.get("url"),
-                    entry.get("image"),
-                    entry.get("display_url"),
-                    self._pick_first_url(entry.get("thumbnails")),
-                ):
-                    if candidate:
-                        urls.append(str(candidate))
+                candidate = self._extract_best_image_candidate(entry)
+                if candidate:
+                    urls.append(candidate)
         urls.extend(self._find_image_urls_in_mapping(web_state))
         deduped: list[str] = []
         seen: set[str] = set()
         for url in urls:
-            sanitized = url.strip()
+            sanitized = self._normalize_image_url(url.strip())
             if not sanitized or sanitized in seen:
                 continue
             seen.add(sanitized)
             deduped.append(sanitized)
         return deduped
+
+    def _extract_best_image_candidate(self, entry: dict[str, object]) -> str | None:
+        for key in ("display_image", "displayImage", "image", "imageURL", "display_url", "url"):
+            candidate = self._pick_first_url(entry.get(key))
+            if candidate:
+                return self._normalize_image_url(candidate)
+        thumbnail_candidate = self._pick_first_url(entry.get("thumbnails"))
+        if thumbnail_candidate:
+            return self._normalize_image_url(thumbnail_candidate)
+        return None
 
     def _extract_audio_url(self, info: dict[str, object], web_state: dict[str, object]) -> str | None:
         formats = info.get("formats")
@@ -462,6 +532,31 @@ class TikTokProvider:
             if path.endswith(f".{extension}"):
                 return extension
         return default
+
+    @staticmethod
+    def _default_headers() -> dict[str, str]:
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+            )
+        }
+
+    @staticmethod
+    def _normalize_image_url(url: str) -> str:
+        cleaned = url.strip()
+        parsed = urlparse(cleaned)
+        host = (parsed.hostname or "").lower()
+        if cleaned.startswith("http://") and any(marker in host for marker in ("muscdn.com", "tiktokcdn.com", "byteimg.com")):
+            return "https://" + cleaned.removeprefix("http://")
+        return cleaned
+
+    @staticmethod
+    def _asset_headers(url: str) -> dict[str, str]:
+        host = (urlparse(url).hostname or "").lower()
+        if any(marker in host for marker in ("muscdn.com", "tiktokcdn.com", "byteimg.com")):
+            return dict(_TIKTOK_BROWSER_HEADERS)
+        return TikTokProvider._default_headers()
 
 
 def _clean_text(value: str) -> str:

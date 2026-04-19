@@ -443,6 +443,7 @@ class MediaPipelineService:
                 )
             except Exception as exc:
                 skipped_count += 1
+                context = getattr(exc, "context", {})
                 log_event(
                     self._logger,
                     30,
@@ -452,7 +453,11 @@ class MediaPipelineService:
                     source_type=request.normalized_resource.platform.value,
                     canonical_url=request.normalized_resource.canonical_url,
                     image_index=entry.order,
-                    image_url=entry.source_url,
+                    original_image_url=context.get("original_url", entry.source_url),
+                    normalized_image_url=context.get("normalized_url", entry.source_url),
+                    https_upgrade_attempted=context.get("https_upgrade_attempted", False),
+                    status_code=context.get("status_code"),
+                    exception=context.get("exception", str(exc)),
                     error_code=getattr(exc, "error_code", "download_failed"),
                 )
                 continue
