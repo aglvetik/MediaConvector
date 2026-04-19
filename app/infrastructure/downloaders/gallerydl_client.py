@@ -16,12 +16,10 @@ class GalleryDlClient:
         binary_path: str,
         timeout_seconds: int,
         semaphore: asyncio.Semaphore,
-        cookies_file: Path | None = None,
     ) -> None:
         self._binary_path = binary_path
         self._timeout_seconds = timeout_seconds
         self._semaphore = semaphore
-        self._cookies_file = cookies_file
         self._logger = get_logger(__name__)
 
     async def probe_url(self, url: str) -> tuple[dict[str, object], ...]:
@@ -80,7 +78,7 @@ class GalleryDlClient:
         return prepared
 
     def _base_command(self) -> list[str]:
-        command = [
+        return [
             self._binary_path,
             "--config-ignore",
             "--no-input",
@@ -88,9 +86,6 @@ class GalleryDlClient:
             "--no-mtime",
             "--warning",
         ]
-        if self._cookies_file is not None and self._cookies_file.exists():
-            command.extend(["--cookies", str(self._cookies_file)])
-        return command
 
     async def _run_command(self, *args: str) -> tuple[str, str]:
         log_event(

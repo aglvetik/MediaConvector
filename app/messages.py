@@ -2,7 +2,7 @@ LOADING_MESSAGE = "Загрузка 🔎"
 VIDEO_SUCCESS_CAPTION = "🎬 Готово!"
 AUDIO_SUCCESS_CAPTION = "🎬 Готово!"
 
-INVALID_TIKTOK_LINK = "Не удалось обработать ссылку. Поддерживаются TikTok, YouTube, Instagram, Facebook, Pinterest, Rutube и Likee."
+INVALID_TIKTOK_LINK = "Не удалось обработать ссылку. Поддерживаются только ссылки TikTok на видео и фото-посты."
 TIKTOK_MUSIC_LINKS_NOT_SUPPORTED = "Ссылки на звуки TikTok пока не поддерживаются.\nПришлите ссылку на видео с этим звуком."
 VIDEO_UNAVAILABLE = "Медиа недоступно или удалено."
 FILE_TOO_LARGE = "Файл слишком большой для отправки в Telegram."

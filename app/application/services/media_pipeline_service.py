@@ -163,8 +163,6 @@ class MediaPipelineService:
         try:
             if request.normalized_resource.resource_type == "photo_post":
                 owner_result = await self._run_photo_post_pipeline(request, provider, work_dir)
-            elif request.normalized_resource.media_kind == "audio":
-                owner_result = await self._run_audio_only_pipeline(request, provider, work_dir)
             else:
                 owner_result = await self._run_video_pipeline(request, provider, work_dir)
 
@@ -312,89 +310,6 @@ class MediaPipelineService:
         except Exception:
             self._logger.exception("visual_pipeline_crash")
             raise
-
-    async def _run_audio_only_pipeline(
-        self,
-        request: MediaRequest,
-        provider: DownloaderProvider,
-        work_dir: Path,
-    ) -> OwnerPipelineResult:
-        metadata = await provider.fetch_metadata(request.normalized_resource)
-        log_event(
-            self._logger,
-            20,
-            "telegram_send_audio_only_started",
-            request_id=request.request_id,
-            chat_id=request.chat_id,
-            normalized_key=request.normalized_resource.normalized_key,
-        )
-        source_audio_path = await provider.download_audio(request.normalized_resource, work_dir)
-        if source_audio_path is None:
-            audio_result = PreparedAudioResult(
-                status="failed_fatal",
-                notice=messages.TEMPORARY_DOWNLOAD_ERROR,
-                error_code="audio_not_available",
-            )
-        else:
-            audio_result = await self._prepare_audio_delivery_asset(
-                request=request,
-                metadata=metadata,
-                source_path=source_audio_path,
-                work_dir=work_dir,
-                fatal_on_failure=True,
-                missing_notice=messages.TEMPORARY_DOWNLOAD_ERROR,
-                failure_notice=messages.TEMPORARY_DOWNLOAD_ERROR,
-            )
-        if source_audio_path is not None and not audio_result.is_prepared:
-            log_event(
-                self._logger,
-                30,
-                "audio_delivery_asset_unavailable",
-                request_id=request.request_id,
-                chat_id=request.chat_id,
-                normalized_key=request.normalized_resource.normalized_key,
-                resource_type=request.normalized_resource.resource_type,
-                audio_filename=audio_result.telegram_filename,
-                source_audio_extension=audio_result.source_audio_extension,
-                final_audio_extension=audio_result.final_audio_extension,
-                error_code=audio_result.error_code or "prepared_audio_missing",
-                error_message=audio_result.error_message,
-                error_context=audio_result.error_context,
-            )
-        media_result = await self._delivery_service.deliver_audio_only(
-            request,
-            audio_result.asset.file_path if audio_result.is_prepared else None,
-            missing_audio_notice=audio_result.notice or messages.TEMPORARY_DOWNLOAD_ERROR,
-            title=audio_result.asset.title if audio_result.is_prepared else None,
-            performer=audio_result.asset.performer if audio_result.is_prepared else None,
-            duration_sec=audio_result.asset.duration_sec if audio_result.is_prepared else None,
-            thumbnail_path=audio_result.asset.thumbnail_path if audio_result.is_prepared else None,
-            filename=audio_result.asset.filename if audio_result.is_prepared else audio_result.telegram_filename,
-            source_audio_extension=(
-                audio_result.asset.source_audio_extension if audio_result.is_prepared else audio_result.source_audio_extension
-            ),
-            final_audio_extension=(
-                audio_result.asset.container_extension if audio_result.is_prepared else audio_result.final_audio_extension
-            ),
-        )
-        if media_result.audio_receipt is not None:
-            cache_entry = await self._cache_service.save_audio_only_result(
-                resource=request.normalized_resource,
-                metadata=metadata,
-                audio_receipt=media_result.audio_receipt,
-            )
-        else:
-            cache_entry = await self._cache_service.save_failed(request.normalized_resource)
-        log_event(
-            self._logger,
-            20,
-            "telegram_send_audio_only_finished",
-            request_id=request.request_id,
-            chat_id=request.chat_id,
-            normalized_key=request.normalized_resource.normalized_key,
-            success=media_result.audio_receipt is not None,
-        )
-        return OwnerPipelineResult(media_result=media_result, cache_entry=cache_entry)
 
     async def _refresh_missing_audio(
         self,

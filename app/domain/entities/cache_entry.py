@@ -51,6 +51,4 @@ class CacheEntry:
             return self.is_ready_for_video
         if normalized_type == "photo_post":
             return self.is_ready_for_photos
-        if normalized_type == "music_only":
-            return self.is_ready_for_audio
         return False

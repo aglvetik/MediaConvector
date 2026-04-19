@@ -62,7 +62,7 @@ async def test_delivery_rethrows_invalid_cached_audio_with_video_sent_context() 
 
 
 @pytest.mark.asyncio
-async def test_delivery_from_cache_sends_cached_audio_without_logging_collision() -> None:
+async def test_delivery_from_cache_sends_cached_video_audio_without_logging_collision() -> None:
     gateway = FakeGateway()
     service = DeliveryService(gateway)
     request = MediaRequest(
@@ -73,32 +73,32 @@ async def test_delivery_from_cache_sends_cached_audio_without_logging_collision(
         chat_type="private",
         message_text="text",
         normalized_resource=NormalizedResource(
-            platform=Platform.LIKEE,
-            resource_type="music_only",
-            resource_id="audio-456",
-            normalized_key="likee:music_only:audio-456",
-            original_url="https://likee.video/@user/audio/audio-456",
-            canonical_url="https://likee.video/@user/audio/audio-456",
-            title="Original sound",
+            platform=Platform.TIKTOK,
+            resource_type="video",
+            resource_id="456",
+            normalized_key="tiktok:video:456",
+            original_url="https://www.tiktok.com/@user/video/456",
+            canonical_url="https://www.tiktok.com/@user/video/456",
+            title="Video title",
             author="Creator",
             duration_sec=15,
         ),
     )
     cache_entry = CacheEntry(
         id=2,
-        platform=Platform.LIKEE,
-        resource_type="music_only",
-        normalized_key="likee:music_only:audio-456",
+        platform=Platform.TIKTOK,
+        resource_type="video",
+        normalized_key="tiktok:video:456",
         original_url=request.normalized_resource.original_url,
         canonical_url=request.normalized_resource.canonical_url,
-        video_file_id=None,
+        video_file_id="video-ok",
         audio_file_id="audio-ok",
         photo_file_ids=(),
-        video_file_unique_id=None,
+        video_file_unique_id="uv",
         audio_file_unique_id="ua",
         photo_file_unique_ids=(),
         duration_sec=15,
-        video_size_bytes=None,
+        video_size_bytes=100,
         audio_size_bytes=100,
         has_audio=True,
         status=CacheStatus.READY,
@@ -113,5 +113,5 @@ async def test_delivery_from_cache_sends_cached_audio_without_logging_collision(
     result = await service.deliver_from_cache(request, cache_entry)
 
     assert result.audio_receipt is not None
-    assert gateway.sent_audio_requests[-1].title == "Original sound"
+    assert gateway.sent_audio_requests[-1].title == "Video title"
     assert gateway.sent_audio_requests[-1].performer == "Creator"

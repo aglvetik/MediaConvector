@@ -43,14 +43,6 @@ class DeliveryService:
         )
         if cache_entry.resource_type == "photo_post":
             result = await self._deliver_photo_post_from_cache(request, cache_entry)
-        elif cache_entry.resource_type == "music_only":
-            result = await self._deliver_primary_audio_from_cache(
-                request,
-                audio_file_id=cache_entry.audio_file_id,
-                has_audio=cache_entry.has_audio,
-                title=request.normalized_resource.title,
-                performer=request.normalized_resource.author,
-            )
         else:
             result = await self._deliver_video_from_cache(request, cache_entry)
         log_event(
@@ -579,88 +571,6 @@ class DeliveryService:
             delivery_status=result.delivery_status.value,
         )
         return result
-
-    async def _deliver_primary_audio_from_cache(
-        self,
-        request: MediaRequest,
-        *,
-        audio_file_id: str | None,
-        has_audio: bool,
-        title: str | None = None,
-        performer: str | None = None,
-    ) -> MediaResult:
-        if audio_file_id is None:
-            if has_audio:
-                raise InvalidCachedMediaError(
-                    "Cached audio is missing while source audio is expected.",
-                    media_kind="audio",
-                    context={"reason": "missing_cached_audio"},
-                )
-            await self._gateway.send_text(request.chat_id, messages.NO_AUDIO_TRACK, request.message_id)
-            return self._build_result(
-                primary_sent=False,
-                audio_requested=True,
-                audio_receipt=None,
-                cache_hit=True,
-                notice=messages.NO_AUDIO_TRACK,
-            )
-
-        log_event(
-            self._logger,
-            20,
-            "telegram_send_audio_started",
-            request_id=request.request_id,
-            chat_id=request.chat_id,
-            normalized_key=request.normalized_resource.normalized_key,
-            cached=True,
-        )
-        try:
-            audio_receipt = await self._gateway.send_audio_by_file_id(
-                request.chat_id,
-                audio_file_id,
-                messages.AUDIO_SUCCESS_CAPTION,
-                request.message_id,
-                title=title,
-                performer=performer,
-                duration=request.normalized_resource.duration_sec,
-            )
-        except Exception as exc:
-            self._log_audio_send_failure(
-                request=request,
-                exc=exc,
-                audio_path=None,
-                filename=None,
-                cached=True,
-            )
-            raise
-        log_event(
-            self._logger,
-            20,
-            "telegram_audio_metadata_sent",
-            request_id=request.request_id,
-            chat_id=request.chat_id,
-            normalized_key=request.normalized_resource.normalized_key,
-            title=title,
-            performer=performer,
-            duration_sec=request.normalized_resource.duration_sec,
-            thumbnail_used=False,
-            audio_filename=None,
-        )
-        log_event(
-            self._logger,
-            20,
-            "telegram_send_audio_finished",
-            request_id=request.request_id,
-            chat_id=request.chat_id,
-            normalized_key=request.normalized_resource.normalized_key,
-            cached=True,
-        )
-        return self._build_result(
-            primary_sent=True,
-            audio_requested=True,
-            audio_receipt=audio_receipt,
-            cache_hit=True,
-        )
 
     async def _send_optional_audio_from_cache(
         self,

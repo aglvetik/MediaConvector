@@ -2,7 +2,6 @@ import asyncio
 
 from app import messages
 from app.application.services.process_message_service import IncomingMessage
-from app.domain.enums.platform import Platform
 
 
 async def test_private_chat_success_flow(service_harness) -> None:
@@ -241,137 +240,6 @@ async def test_unsupported_url_flow_returns_user_message(service_harness) -> Non
     assert service_harness.gateway.text_messages[-1].text == messages.INVALID_TIKTOK_LINK
 
 
-async def test_youtube_video_url_flow(service_harness) -> None:
-    url = "https://youtu.be/video-123"
-    handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=402, message_id=24, chat_type="private", text=url)
-    )
-    assert handled is True
-    assert len(service_harness.gateway.sent_video_receipts) == 1
-    assert len(service_harness.gateway.sent_audio_receipts) == 1
-    assert service_harness.generic_providers[Platform.YOUTUBE].download_calls["youtube:video:video-123"] == 1
-
-
-async def test_youtube_video_cache_hit_flow(service_harness) -> None:
-    url = "https://youtu.be/video-cache-1"
-    await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=403, message_id=25, chat_type="private", text=url)
-    )
-    await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=2, user_id=404, message_id=26, chat_type="private", text=url)
-    )
-    assert service_harness.generic_providers[Platform.YOUTUBE].download_calls["youtube:video:video-cache-1"] == 1
-    assert len(service_harness.gateway.sent_video_receipts) == 2
-
-
-async def test_instagram_gallery_flow_sends_photos_without_no_audio_notice(service_harness) -> None:
-    url = "https://www.instagram.com/p/gallery-123/"
-    handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=405, message_id=27, chat_type="private", text=url)
-    )
-    assert handled is True
-    assert len(service_harness.gateway.sent_photo_receipts) == 3
-    assert len(service_harness.gateway.sent_audio_receipts) == 0
-    assert service_harness.gateway.text_messages == []
-    assert service_harness.generic_providers[Platform.INSTAGRAM].image_download_calls["instagram:photo_post:gallery-123"] == 1
-
-
-async def test_gallery_with_one_broken_entry_still_sends_remaining_images(service_harness) -> None:
-    normalized_key = "instagram:photo_post:gallery-broken-1"
-    service_harness.generic_providers[Platform.INSTAGRAM].broken_image_entries[normalized_key].add(2)
-
-    handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(
-            chat_id=1,
-            user_id=409,
-            message_id=31,
-            chat_type="private",
-            text="https://www.instagram.com/p/gallery-broken-1/",
-        )
-    )
-
-    assert handled is True
-    assert len(service_harness.gateway.sent_photo_receipts) == 2
-    assert service_harness.gateway.text_messages == []
-
-
-async def test_gallery_with_all_broken_entries_fails_cleanly(service_harness) -> None:
-    normalized_key = "facebook:photo_post:gallery-all-broken"
-    service_harness.generic_providers[Platform.FACEBOOK].broken_image_entries[normalized_key].update({1, 2, 3})
-
-    handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(
-            chat_id=1,
-            user_id=410,
-            message_id=32,
-            chat_type="private",
-            text="https://www.facebook.com/gallery-all-broken",
-        )
-    )
-
-    assert handled is True
-    assert len(service_harness.gateway.sent_photo_receipts) == 0
-    assert service_harness.gateway.text_messages[-1].text == messages.TEMPORARY_DOWNLOAD_ERROR
-
-
-async def test_visual_post_with_optional_audio_failure_still_sends_images(service_harness) -> None:
-    normalized_key = "instagram:photo_post:gallery-with-audio-777"
-    service_harness.generic_providers[Platform.INSTAGRAM].audio_fail_keys.add(normalized_key)
-
-    handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(
-            chat_id=1,
-            user_id=411,
-            message_id=33,
-            chat_type="private",
-            text="https://www.instagram.com/p/gallery-with-audio-777/",
-        )
-    )
-
-    assert handled is True
-    assert len(service_harness.gateway.sent_photo_receipts) == 3
-    assert len(service_harness.gateway.sent_audio_receipts) == 0
-    assert service_harness.gateway.text_messages[-1].text == messages.SEPARATE_AUDIO_SEND_FAILED
-
-
-async def test_single_photo_source_sends_single_photo(service_harness) -> None:
-    url = "https://www.pinterest.com/pin/single-42/"
-    handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=406, message_id=28, chat_type="private", text=url)
-    )
-    assert handled is True
-    assert len(service_harness.gateway.sent_photo_receipts) == 1
-    assert len(service_harness.gateway.sent_audio_receipts) == 0
-    assert service_harness.gateway.text_messages == []
-
-
-async def test_download_first_gallery_images_are_converted_to_jpg_before_delivery(service_harness) -> None:
-    normalized_key = "pinterest:photo_post:single-webp-42"
-    provider = service_harness.generic_providers[Platform.PINTEREST]
-    provider.download_first_gallery_keys.add(normalized_key)
-    provider.photo_counts[normalized_key] = 1
-    provider.photo_extensions[normalized_key] = ("webp",)
-
-    handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=4060, message_id=281, chat_type="private", text="https://www.pinterest.com/pin/single-webp-42/")
-    )
-
-    assert handled is True
-    assert len(service_harness.gateway.sent_photo_paths) == 1
-    assert service_harness.gateway.sent_photo_paths[0].suffix.lower() == ".jpg"
-
-
-async def test_audio_only_source_flow(service_harness) -> None:
-    url = "https://likee.video/@user/audio/audio-555"
-    handled = await service_harness.process_message_service.handle_message(
-        IncomingMessage(chat_id=1, user_id=407, message_id=29, chat_type="private", text=url)
-    )
-    assert handled is True
-    assert len(service_harness.gateway.sent_video_receipts) == 0
-    assert len(service_harness.gateway.sent_audio_receipts) == 1
-    assert service_harness.generic_providers[Platform.LIKEE].audio_download_calls["likee:music_only:audio-555"] == 1
-
-
 async def test_audio_delivery_includes_metadata_and_human_readable_filename(service_harness) -> None:
     handled = await service_harness.process_message_service.handle_message(
         IncomingMessage(
@@ -393,15 +261,15 @@ async def test_audio_delivery_includes_metadata_and_human_readable_filename(serv
     assert "video" in audio_request.filename.lower()
 
 
-async def test_supported_url_later_in_message_is_processed(service_harness) -> None:
+async def test_supported_tiktok_url_later_in_message_is_processed(service_harness) -> None:
     handled = await service_harness.process_message_service.handle_message(
         IncomingMessage(
             chat_id=1,
             user_id=408,
             message_id=30,
             chat_type="private",
-            text="bad https://example.com/thing and then https://youtu.be/multi-999",
+            text="bad https://example.com/thing and then https://www.tiktok.com/@user/video/424242",
         )
     )
     assert handled is True
-    assert service_harness.generic_providers[Platform.YOUTUBE].download_calls["youtube:video:multi-999"] == 1
+    assert service_harness.provider.download_calls["tiktok:video:424242"] == 1

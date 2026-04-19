@@ -30,8 +30,7 @@ from app.infrastructure.persistence.sqlite import (
     SqlAlchemyProcessedMessageRepository,
     SqlAlchemyRequestLogRepository,
 )
-from app.domain.enums.platform import Platform
-from app.infrastructure.providers import GalleryDlUrlProvider, RoutedUrlProvider, TikTokProvider, YtDlpUrlProvider
+from app.infrastructure.providers import TikTokProvider
 from app.infrastructure.telegram import AiogramTelegramGateway
 from app.infrastructure.temp import TempFileManager
 from app.workers import CleanupWorker, HealthWorker
@@ -58,29 +57,10 @@ def build_container(settings: Settings) -> AppContainer:
     database = Database(settings.database_url)
     bot = Bot(token=settings.bot_token)
     gateway = AiogramTelegramGateway(bot=bot, max_file_size_bytes=settings.max_file_size_bytes)
-    cookies_file = settings.resolved_ytdlp_cookies_file
-
-    log_event(
-        logger,
-        logging.INFO,
-        "cookies_path",
-        cookies_file_path=str(cookies_file) if cookies_file is not None else None,
-        cookies_enabled=cookies_file is not None and cookies_file.exists(),
-        cookies_exists=cookies_file.exists() if cookies_file is not None else False,
-    )
-    if cookies_file is not None and not cookies_file.exists():
-        log_event(
-            logger,
-            logging.WARNING,
-            "cookies_missing",
-            cookies_file_path=str(cookies_file),
-        )
     log_event(
         logger,
         logging.INFO,
         "startup_paths",
-        cookies=str(cookies_file) if cookies_file is not None else None,
-        cookies_exists=cookies_file.exists() if cookies_file is not None else False,
         ffmpeg_configured=settings.ffmpeg_path,
         ffmpeg_resolved=resolved_binaries["ffmpeg"],
         ytdlp_configured=settings.ytdlp_path,
@@ -102,13 +82,11 @@ def build_container(settings: Settings) -> AppContainer:
         binary_path=resolved_binaries["yt-dlp"],
         timeout_seconds=settings.download_timeout_seconds,
         semaphore=download_semaphore,
-        cookies_file=cookies_file,
     )
     gallerydl_client = GalleryDlClient(
         binary_path=resolved_binaries["gallery-dl"],
         timeout_seconds=settings.download_timeout_seconds,
         semaphore=download_semaphore,
-        cookies_file=cookies_file,
     )
     ffmpeg_adapter = FfmpegAdapter(
         ffmpeg_path=resolved_binaries["ffmpeg"],
@@ -119,84 +97,6 @@ def build_container(settings: Settings) -> AppContainer:
         downloader=ytdlp_client,
         request_timeout_seconds=settings.request_timeout_seconds,
         gallery_downloader=gallerydl_client,
-    )
-    youtube_provider = RoutedUrlProvider(
-        platform=Platform.YOUTUBE,
-        ytdlp_provider=YtDlpUrlProvider(
-            platform=Platform.YOUTUBE,
-            downloader=ytdlp_client,
-            request_timeout_seconds=settings.request_timeout_seconds,
-        ),
-        gallery_provider=GalleryDlUrlProvider(
-            platform=Platform.YOUTUBE,
-            downloader=gallerydl_client,
-            request_timeout_seconds=settings.request_timeout_seconds,
-        ),
-    )
-    instagram_provider = RoutedUrlProvider(
-        platform=Platform.INSTAGRAM,
-        ytdlp_provider=YtDlpUrlProvider(
-            platform=Platform.INSTAGRAM,
-            downloader=ytdlp_client,
-            request_timeout_seconds=settings.request_timeout_seconds,
-        ),
-        gallery_provider=GalleryDlUrlProvider(
-            platform=Platform.INSTAGRAM,
-            downloader=gallerydl_client,
-            request_timeout_seconds=settings.request_timeout_seconds,
-        ),
-    )
-    facebook_provider = RoutedUrlProvider(
-        platform=Platform.FACEBOOK,
-        ytdlp_provider=YtDlpUrlProvider(
-            platform=Platform.FACEBOOK,
-            downloader=ytdlp_client,
-            request_timeout_seconds=settings.request_timeout_seconds,
-        ),
-        gallery_provider=GalleryDlUrlProvider(
-            platform=Platform.FACEBOOK,
-            downloader=gallerydl_client,
-            request_timeout_seconds=settings.request_timeout_seconds,
-        ),
-    )
-    pinterest_provider = RoutedUrlProvider(
-        platform=Platform.PINTEREST,
-        ytdlp_provider=YtDlpUrlProvider(
-            platform=Platform.PINTEREST,
-            downloader=ytdlp_client,
-            request_timeout_seconds=settings.request_timeout_seconds,
-        ),
-        gallery_provider=GalleryDlUrlProvider(
-            platform=Platform.PINTEREST,
-            downloader=gallerydl_client,
-            request_timeout_seconds=settings.request_timeout_seconds,
-        ),
-    )
-    rutube_provider = RoutedUrlProvider(
-        platform=Platform.RUTUBE,
-        ytdlp_provider=YtDlpUrlProvider(
-            platform=Platform.RUTUBE,
-            downloader=ytdlp_client,
-            request_timeout_seconds=settings.request_timeout_seconds,
-        ),
-        gallery_provider=GalleryDlUrlProvider(
-            platform=Platform.RUTUBE,
-            downloader=gallerydl_client,
-            request_timeout_seconds=settings.request_timeout_seconds,
-        ),
-    )
-    likee_provider = RoutedUrlProvider(
-        platform=Platform.LIKEE,
-        ytdlp_provider=YtDlpUrlProvider(
-            platform=Platform.LIKEE,
-            downloader=ytdlp_client,
-            request_timeout_seconds=settings.request_timeout_seconds,
-        ),
-        gallery_provider=GalleryDlUrlProvider(
-            platform=Platform.LIKEE,
-            downloader=gallerydl_client,
-            request_timeout_seconds=settings.request_timeout_seconds,
-        ),
     )
 
     metrics_service = MetricsService()
@@ -220,15 +120,7 @@ def build_container(settings: Settings) -> AppContainer:
         cooldown_seconds=settings.user_request_cooldown_seconds,
     )
     process_message_service = ProcessMessageService(
-        providers=(
-            tiktok_provider,
-            youtube_provider,
-            instagram_provider,
-            facebook_provider,
-            pinterest_provider,
-            rutube_provider,
-            likee_provider,
-        ),
+        providers=(tiktok_provider,),
         delivery_service=delivery_service,
         media_pipeline_service=media_pipeline_service,
         rate_limit_service=rate_limit_service,

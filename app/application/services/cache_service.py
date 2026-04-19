@@ -163,50 +163,6 @@ class CacheService:
         )
         return saved
 
-    async def save_audio_only_result(
-        self,
-        *,
-        resource: NormalizedResource,
-        metadata: MediaMetadata | None,
-        audio_receipt: DeliveryReceipt,
-        previous_entry: CacheEntry | None = None,
-    ) -> CacheEntry:
-        entry = CacheEntry(
-            id=previous_entry.id if previous_entry else None,
-            platform=resource.platform,
-            resource_type=resource.resource_type,
-            normalized_key=resource.normalized_key,
-            original_url=resource.original_url,
-            canonical_url=resource.canonical_url,
-            video_file_id=None,
-            audio_file_id=audio_receipt.file_id,
-            photo_file_ids=(),
-            video_file_unique_id=None,
-            audio_file_unique_id=audio_receipt.file_unique_id,
-            photo_file_unique_ids=(),
-            duration_sec=metadata.duration_sec if metadata else None,
-            video_size_bytes=None,
-            audio_size_bytes=audio_receipt.size_bytes,
-            has_audio=True,
-            status=CacheStatus.READY,
-            is_valid=True,
-            cache_version=previous_entry.cache_version if previous_entry else 1,
-            hit_count=previous_entry.hit_count if previous_entry else 0,
-            created_at=previous_entry.created_at if previous_entry else None,
-            updated_at=None,
-            last_hit_at=previous_entry.last_hit_at if previous_entry else None,
-        )
-        saved = await self._repository.save_result(entry)
-        log_event(
-            self._logger,
-            20,
-            "cache_saved",
-            normalized_key=resource.normalized_key,
-            status=saved.status.value,
-            has_audio=saved.has_audio,
-        )
-        return saved
-
     async def save_audio_refresh(
         self,
         *,

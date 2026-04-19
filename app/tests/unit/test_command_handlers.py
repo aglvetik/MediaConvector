@@ -7,7 +7,7 @@ def test_start_text_is_short_and_non_technical() -> None:
     text = _start_text()
 
     assert "TikTok" in text
-    assert "YouTube" in text
+    assert "YouTube" not in text
     assert "групп" in text.casefold()
     for forbidden in ("yt-dlp", "gallery-dl", "extractor", "engine", "pipeline", "normalization", "audio-first"):
         assert forbidden not in text.casefold()

@@ -19,12 +19,10 @@ class YtDlpClient:
         binary_path: str,
         timeout_seconds: int,
         semaphore: asyncio.Semaphore,
-        cookies_file: Path | None = None,
     ) -> None:
         self._binary_path = binary_path
         self._timeout_seconds = timeout_seconds
         self._semaphore = semaphore
-        self._cookies_file = cookies_file
         self._logger = get_logger(__name__)
 
     async def fetch_metadata(self, normalized: NormalizedResource) -> MediaMetadata:
@@ -293,8 +291,6 @@ class YtDlpClient:
             "extractor_retries": 3,
             "cachedir": False,
         }
-        if self._cookies_file is not None and self._cookies_file.exists():
-            options["cookiefile"] = str(self._cookies_file)
         if extra_options:
             options.update(extra_options)
         return {key: value for key, value in options.items() if value is not None}
