@@ -425,7 +425,8 @@ class TikTokProvider:
         return await self._downloader.fetch_metadata(normalized)
 
     async def download_video(self, normalized: NormalizedResource, work_dir: Path) -> Path:
-        path, _ = await self._downloader.download_video(normalized, work_dir)
+        download_target = self._build_source_video_resource(normalized) if normalized.resource_type == TikTokResourceType.MUSIC_ONLY.value and normalized.source_video_url else normalized
+        path, _ = await self._downloader.download_video(download_target, work_dir)
         return path
 
     async def download_audio(self, normalized: NormalizedResource, work_dir: Path) -> Path | None:
@@ -436,18 +437,16 @@ class TikTokProvider:
             return await self._download_audio_via_ytdlp(normalized, work_dir, allow_direct_fallback=normalized.audio_url is not None)
         if normalized.resource_type == TikTokResourceType.MUSIC_ONLY.value:
             if normalized.source_video_url:
-                log_event(
-                    self._logger,
-                    20,
-                    "tiktok_music_pipeline_using_source_video",
-                    normalized_key=normalized.normalized_key,
-                    canonical_url=normalized.canonical_url,
-                    source_video_url=normalized.source_video_url,
-                    source_video_id=normalized.source_video_id,
+                raise DownloadError(
+                    "Direct audio fallback is blocked when a TikTok source video is resolved.",
+                    temporary=True,
+                    context={
+                        "normalized_key": normalized.normalized_key,
+                        "canonical_url": normalized.canonical_url,
+                        "source_video_url": normalized.source_video_url,
+                        "reason": "music_only_source_video_path_required",
+                    },
                 )
-                source_video = self._build_source_video_resource(normalized)
-                path, _ = await self._downloader.download_video(source_video, work_dir)
-                return path
             log_event(
                 self._logger,
                 30,

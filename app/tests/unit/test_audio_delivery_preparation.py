@@ -13,7 +13,7 @@ from app.domain.enums.delivery_status import DeliveryStatus
 from app.domain.enums.platform import Platform
 
 
-def _build_music_request() -> MediaRequest:
+def _build_music_request(*, source_video_url: str | None = None, source_video_id: str | None = None) -> MediaRequest:
     return MediaRequest(
         request_id="req-audio",
         chat_id=1,
@@ -31,6 +31,9 @@ def _build_music_request() -> MediaRequest:
             media_kind="audio",
             title="Original sound",
             author="Creator",
+            source_video_url=source_video_url,
+            source_video_id=source_video_id,
+            source_resolution_strategy="original_source_video" if source_video_url is not None else None,
             duration_sec=15,
         ),
     )
@@ -124,7 +127,10 @@ async def test_tiktok_music_fallback_can_keep_consistent_m4a_when_conversion_dis
 
 @pytest.mark.asyncio
 async def test_music_only_pipeline_routes_final_prepared_audio_to_audio_delivery(service_harness) -> None:
-    request = _build_music_request()
+    request = _build_music_request(
+        source_video_url="https://www.tiktok.com/@creator/video/9876543210123456789",
+        source_video_id="9876543210123456789",
+    )
     captured: dict[str, object] = {}
 
     async def fake_deliver_audio_only(request_arg, audio_path, **kwargs):
@@ -151,8 +157,32 @@ async def test_music_only_pipeline_routes_final_prepared_audio_to_audio_delivery
     assert isinstance(captured["audio_path"], Path)
     assert captured["audio_path"].suffix.lower() == ".mp3"
     assert str(captured["filename"]).endswith(".mp3")
-    assert captured["source_audio_extension"] == "m4a"
+    assert captured["source_audio_extension"] == "mp4"
     assert captured["final_audio_extension"] == "mp3"
+
+
+@pytest.mark.asyncio
+async def test_music_only_runtime_path_prefers_source_video_and_logs_it(service_harness, monkeypatch) -> None:
+    request = _build_music_request(
+        source_video_url="https://www.tiktok.com/@creator/video/9876543210123456790",
+        source_video_id="9876543210123456790",
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def fake_log_event(logger, level, event_name, **fields) -> None:
+        del logger, level
+        events.append((event_name, fields))
+
+    monkeypatch.setattr("app.application.services.media_pipeline_service.log_event", fake_log_event)
+
+    result = await service_harness.media_pipeline_service.process(request, service_harness.provider)
+
+    assert result.audio_receipt is not None
+    assert service_harness.provider.download_calls["tiktok:music_only:123456"] == 1
+    assert service_harness.provider.audio_download_calls["tiktok:music_only:123456"] == 0
+    event_names = [event_name for event_name, _ in events]
+    assert "tiktok_music_pipeline_using_source_video" in event_names
+    assert "tiktok_music_audio_extracted_from_source_video" in event_names
 
 
 @pytest.mark.asyncio

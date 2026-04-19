@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.domain.enums.platform import Platform
+from app.domain.errors import DownloadError
 from app.infrastructure.providers.tiktok.provider import TikTokProvider
 
 
@@ -409,12 +410,46 @@ async def test_tiktok_music_url_prefers_original_source_video_download(monkeypat
     monkeypatch.setattr(provider, "_load_web_state", fake_load_web_state)
 
     normalized = await provider.normalize("https://www.tiktok.com/music/original-sound-888888")
-    audio_path = await provider.download_audio(normalized, tmp_path)
+    video_path = await provider.download_video(normalized, tmp_path)
 
-    assert audio_path is not None
-    assert audio_path.exists()
-    assert audio_path.suffix == ".mp4"
+    assert video_path is not None
+    assert video_path.exists()
+    assert video_path.suffix == ".mp4"
     assert downloader.download_video_urls == ["https://www.tiktok.com/@creator/video/998877665544332211"]
+    assert downloader.download_audio_urls == []
+
+
+@pytest.mark.asyncio
+async def test_tiktok_music_url_blocks_direct_audio_branch_when_source_video_is_resolved(monkeypatch, tmp_path: Path) -> None:
+    downloader = StubDownloader({"id": "888889", "title": "Original sound", "uploader": "Creator"})
+    provider = TikTokProvider(
+        downloader=downloader,
+        request_timeout_seconds=10,
+        gallery_downloader=StubGalleryDownloader(()),
+    )
+
+    async def fake_resolve_short_url(url: str) -> str:
+        return url
+
+    async def fake_load_web_state(url: str) -> dict[str, object]:
+        return {
+            "musicInfo": {
+                "originalVideo": {
+                    "id": "998877665544332212",
+                    "authorName": "creator",
+                    "musicId": "888889",
+                }
+            }
+        }
+
+    monkeypatch.setattr(provider, "_resolve_short_url", fake_resolve_short_url)
+    monkeypatch.setattr(provider, "_load_web_state", fake_load_web_state)
+
+    normalized = await provider.normalize("https://www.tiktok.com/music/original-sound-888889")
+
+    with pytest.raises(DownloadError):
+        await provider.download_audio(normalized, tmp_path)
+
     assert downloader.download_audio_urls == []
 
 
