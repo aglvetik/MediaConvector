@@ -1,5 +1,5 @@
 # TikTok Telegram URL Downloader Bot
-
+ 
 Production-oriented Telegram bot for Python 3.11 that downloads public TikTok links and sends the media back to Telegram.
 
 The bot works from ordinary text messages with URLs. It detects the first TikTok link in the message, normalizes it into a shared media artifact, downloads the media with the right engine, sends the appropriate Telegram media type, and reuses Telegram `file_id` cache for repeated requests.
